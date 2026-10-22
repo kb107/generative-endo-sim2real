@@ -1,0 +1,52 @@
+schema_version: 1
+backend: pixart_alpha
+model_id: PixArt-alpha/PixArt-XL-2-512x512
+revision: 50f702106901db6d0f8b67eb88e814c56ded2692
+prompt: an endoscopic view of the colon lumen
+resolution: 512
+precision: bfloat16
+lora:
+  rank: 16
+  alpha: 16
+  target_modules: [to_q, to_k, to_v, to_out.0]
+controller:
+  num_layers: 13
+  initialization: clean_base_first_blocks
+  latent_policy: posterior_mode
+  conditioning_scale: 1.0
+training:
+  rgb_latent_policy: posterior_sample
+  lora_lr: 0.0001
+  controller_lr: 0.00001
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  effective_batch: 8
+  micro_batch: 8
+  seeds:                      # separate named streams; stages never share batch order or noise
+    adapter_init: {source: 42, target: 43}
+    loader: {source_lora: 101, target_lora: 202, controller: 303}
+    noise: {source_lora: 1101, target_lora: 1202, controller: 1303}
+inference:
+  scheduler: DPMSolverMultistepScheduler
+  steps: 20
+  guidance_scale: 4.5
+  seed: 20261019
+smoke:
+  source_manifest: outputs/manifests/milestone_v1/source_train.jsonl
+  output_dir: outputs/generator-integration/smoke
+  profile_updates: 100
+  profile_images: 16
+  warmup_updates: 3
+  lora_updates: 20
+  controller_updates: 20
+  smoke_micro_batch: 4
+  num_workers: 4
+  min_adapter_effect: 0.001
+  prompt_cache: outputs/generator-integration/prompt_cache.safetensors
+  diagnostics: outputs/manifests/milestone_v1/diagnostics.json
+  target_manifest: outputs/manifests/milestone_v1/target_appearance_train.jsonl
+  inference_batch: 4
+  probe: {lr: 0.00001, warmup: 0, updates: 160, eval_at: [5, 10, 20, 40, 80, 120, 160],
+          items: 4, item_stride: 700, noise_seed: 7001, eval_seeds: 8}
+  recovery_atol: 0.00001
+  recovery_rtol: 0.00001

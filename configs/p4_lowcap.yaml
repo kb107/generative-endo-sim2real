@@ -1,0 +1,324 @@
+# CAMPAIGN-2 LOW-CAPACITY CONTROLLER CONFIG (docs/lowrank-controller.md): copy of the p4_sweep.yaml pattern with a
+# `controller:` block (kind lowrank) and short probe runs; non-deterministic attention (lower memory, faster; exact
+# resume not needed for probes). The four base runs below are unchanged copies (source_lora is the source LoRA the
+# low-rank controllers train under; reuse its existing outputs/p4-appearance/runs/source_lora run, do not retrain).
+# P4 appearance-LoRA and source-controller training stage.
+# The training runs, the gate rubric and every pass rule below are declared BEFORE any P4 job
+# runs (this file's first run is the smoke on GPU 2, 2026-10-19). Do not edit a rule after seeing
+# its result; a change after results are seen is a new, disclosed protocol.
+schema_version: 1
+generator_config: configs/generator.yaml    # base model, LoRA/controller shapes, lr/batch/clip, adapter init seeds
+output_root: outputs/p4-appearance
+num_workers: 4                              # execution detail (not in the resume fingerprint)
+deterministic_attention: false             # math SDPA kernel: bitwise-repeatable backward (flash/mem-efficient are not)
+eval_seed: 4242                             # fixed noise/timesteps and RGB-latent sampling for evaluation losses
+train_probe_frames: 64                      # evenly spaced fixed training frames for the probe loss
+# Low-capacity controller defaults for every controller-stage run (a run's own `controller:` entry overrides
+# ranks; kind: full or no block = the unchanged full controller). init_seed seeds the random `down` factors.
+controller: {kind: lowrank, block_rank: 8, before_rank: 32, after_rank: 8, init_seed: 5303}
+manifests:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  target_appearance_train: outputs/manifests/milestone_v1/target_appearance_train.jsonl
+  target_appearance_validation: outputs/manifests/milestone_v1/target_appearance_validation.jsonl
+diagnostics: outputs/manifests/milestone_v1/diagnostics.json
+
+# Learning rate, weight decay, clipping and effective batch (8) come from configs/generator.yaml
+# (lr_from names the key). No LR warmup, constant LR, AdamW. One neutral prompt (generator.yaml).
+# Loader and noise seeds are separate for every run and differ from the adapter init seeds.
+runs:
+  source_lora:                   # source_train RGB only; source_validation is evaluation only
+    stage: lora
+    adapter: source
+    role: source_lora
+    train: source_train
+    heldout: source_validation
+    lr_from: lora_lr
+    steps: 1000
+    checkpoint_every: 250
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 3
+    seeds: {loader: 101, noise: 1101}
+  target_lora:                   # C1 appearance_train, RGB only (no depth/pose is indexed or decoded)
+    stage: lora
+    adapter: target
+    role: target_lora
+    train: target_appearance_train
+    heldout: target_appearance_validation
+    lr_from: lora_lr
+    steps: 1000
+    checkpoint_every: 250
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 3
+    seeds: {loader: 202, noise: 1202}
+  controller_overfit:            # 8 source_train pairs, trained source LoRA and backbone frozen
+    controller: {kind: full}      # not part of the low-capacity experiment (config-level lowrank default ignored)
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    subset: {kind: overfit_pairs, pool_per_scene: 64}   # 4 per scene, median-depth rank endpoints
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    steps: 500                   # may be extended once to 1000 (constant LR; gate rule below)
+    checkpoint_every: 250
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 4
+    seeds: {loader: 304, noise: 1304}
+  controller_pilot:              # source_train pairs, trained source LoRA and backbone frozen
+    controller: {kind: full}      # not part of the low-capacity experiment (config-level lowrank default ignored)
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    steps: 2000
+    checkpoint_every: 500
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 4
+    seeds: {loader: 303, noise: 1303}
+
+  target_lora_v2:                # v2 retrain, declared in configs/p5_sweep.yaml `step_B_retrain` before the sweep ran
+    stage: lora
+    adapter: target
+    role: target_lora
+    train: target_appearance_train
+    heldout: target_appearance_validation
+    lr_from: lora_lr
+    lr: 0.00005                  # explicit override of the shared 1e-4 (v2 only)
+    steps: 2000
+    checkpoint_every: 500
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 3
+    seeds: {loader: 212, noise: 1212}   # adapter init seed stays 43 (generator.yaml): same clean base, same init
+
+  # Low-capacity controller probes (declared before they ran): 600 steps each, source LoRA + backbone frozen, trainable =
+  # attention LoRA on the 13 copied blocks + low-rank before/after projections (generation/lowrank_controller.py).
+  # Selection (pre-declared, never C2): (1) held-out loss gap heldout_wrong - heldout_correct in eval.jsonl (higher = uses
+  # depth more); (2) C1-validation DINOv2 FD of 128 target-LoRA + controller generations. Reference: the full controller.
+  # Ranks come from the config-level `controller:` block unless a run overrides them; init_seed 5303 is shared.
+  controller_lc_r8_a8_lr3e-4:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.0003
+    controller: {block_rank: 8, after_rank: 8}
+    steps: 600
+    checkpoint_every: 200
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 2
+    seeds: {loader: 363, noise: 1363}
+  controller_lc_r8_a8_lr1e-3:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.001
+    controller: {block_rank: 8, after_rank: 8}
+    steps: 600
+    checkpoint_every: 200
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 2
+    seeds: {loader: 373, noise: 1373}
+  controller_lc_r4_a4_lr3e-4:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.0003
+    controller: {block_rank: 4, after_rank: 4}
+    steps: 600
+    checkpoint_every: 200
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 2
+    seeds: {loader: 383, noise: 1383}
+  controller_lc_r16_a16_lr3e-4:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.0003
+    controller: {block_rank: 16, after_rank: 16}
+    steps: 600
+    checkpoint_every: 200
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 2
+    seeds: {loader: 393, noise: 1393}
+  controller_lc_r8_a8_lr1e-4:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.0001
+    controller: {block_rank: 8, after_rank: 8}
+    steps: 600
+    checkpoint_every: 200
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 2
+    seeds: {loader: 403, noise: 1403}
+
+  # PLACEHOLDER long run: the parent fills lr and the ranks from the 600-step probes (the values below are the
+  # first probe's, not a selection). 8000 steps like controller_long_lr1e-4.
+  controller_lowrank_long:
+    stage: controller
+    adapter: source
+    role: controller
+    train: source_train
+    heldout: source_validation
+    source_lora_run: source_lora
+    lr_from: controller_lr
+    lr: 0.0003
+    controller: {block_rank: 16, after_rank: 16}   # parent fill (2026-10-21): best 600-step probe by held-out gap (tie with full controller at 600 steps)
+    steps: 3000   # reduced from 8000 for time; the full-controller comparison point is its own step-3000 checkpoint
+    checkpoint_every: 500
+    warmup: 0
+    micro_batch: 8
+    time_cap_hours: 8
+    seeds: {loader: 413, noise: 1413}
+
+# ---------------------------------------------------------------------------------------------
+# Source-controller gate and appearance grids (generation/p4_eval.py, p4_proxy.py, p4_report.py)
+# ---------------------------------------------------------------------------------------------
+gate:
+  # Fixed conditions: the 8 reduced-gate source-validation IDs of diagnostics.json (balanced over
+  # the two held-out scenes, chosen before any generation was seen) and its fixed cross-scene
+  # reversed-median-rank wrong-depth bijection (no self match). Overfit gate: the 8 training pairs
+  # (outputs/p4-appearance/runs/controller_overfit/overfit_pairs.json) with the same rule.
+  conditions: reduced_gate_sample_ids
+  wrong_depth: reduced_gate_wrong_depth_permutation
+  seeds: [20261019, 20262019]    # two paired inference seeds; the same noise in every arm
+  control_scale: 1.0
+  arms: [correct, "off", wrong]    # source LoRA active; off = no controller; wrong = partner's depth
+  image_format: png8             # generated images are stored as 8-bit PNG, as downstream data will be
+  # Proxy: frozen official DA3Metric-Large head (no fine-tuning, read-only), run in the DA3 venv
+  # as a separate step (generation/p4_proxy.py). Scale-free: predictions are median-scaled to the
+  # reference depth on its valid pixels (camera K therefore does not matter). Primary metric:
+  # median-scaled AbsRel (lower is better); secondary: Spearman rank correlation on a stride-4
+  # pixel grid (higher is better). The unit of analysis is the condition (mean over the seeds).
+  proxy:
+    metric: median_scaled_abs_rel
+    secondary: spearman_stride4
+  rules:
+    min_conditions: 7            # of 8; each direction-of-effect check must hold in >= 7 conditions
+    require_positive_mean_gain: true
+    checks:
+      R0_proxy_audit: >
+        On the REAL source-validation RGB of the 8 conditions the proxy must prefer the true depth
+        over the partner's wrong depth: err(real_i, depth_i) < err(real_i, depth_partner(i)) in
+        >= min_conditions. If it fails, the proxy is non-discriminative and the intervention checks
+        below are reported but labelled UNINTERPRETABLE (the gate cannot pass on proxy evidence).
+      R1_correct_beats_off: err(C_i, depth_i) < err(O_i, depth_i) for >= min_conditions, mean gain > 0
+      R2_correct_beats_wrong: err(C_i, depth_i) < err(W_i, depth_i) for >= min_conditions, mean gain > 0
+      R3_wrong_tracks_supplied: >
+        err(W_i, depth_partner(i)) < err(W_i, depth_i) for >= min_conditions, mean gain > 0 (an image
+        generated from the partner's depth follows the supplied depth, not the original one)
+    overall: >
+      Controller gate PASS = R0 and R1 and R2 and R3 hold AND the visual rubric below is met.
+      If the proxy and the visual rubric disagree, or R0 fails, the gate is AMBIGUOUS: report
+      the evidence and stop (no tuning of the target LoRA or of C2).
+    overfit_extension: >
+      Overfit run (8 training pairs): gated at steps 250 and 500. If the 500-step gate fails,
+      extend the same run once to 1000 steps (constant LR) and gate again; no other change.
+    pilot_gates_at_steps: [500, 1000, 1500, 2000]
+    budget_adequacy: >
+      The pilot budget is called ENOUGH if the checks hold at the final step. If they fail and the
+      mean R1 gain is still rising between steps 1500 and 2000 the label is POSSIBLY UNDERTRAINED
+      (not evidence that transfer fails). If they fail with a flat or falling R1 gain: NOT FOLLOWING
+      DEPTH AT THIS BUDGET. Reported as measured; undertraining is not proof that transfer fails.
+  visual_rubric:
+    scale: yes | partly | no, rated by the reviewing agent on the saved grid, per condition
+    questions:
+      layout_follows_control: >
+        The lumen/fold/wall layout of the correct-depth image matches the control image (near
+        regions bright, the lumen opening where the depth is far) more than the off image does.
+      wrong_depth_moves_layout: >
+        Supplying the partner's depth visibly moves the layout toward the partner's control image.
+      not_degenerate: No collapse to texture, noise, a flat field, or repeated identical images.
+    pass: layout_follows_control = yes in >= 6 of 8 conditions, wrong_depth_moves_layout = yes in
+      >= 6 of 8, and not_degenerate holds for all arms
+  teacher_forced_loss:
+    note: >
+      Fixed-noise denoising loss with correct / off / wrong control on held-out source validation
+      (eval.jsonl). Pre-declared direction: loss_correct < loss_off and loss_correct < loss_wrong at
+      the final step. Supportive evidence only; never sufficient for a pass.
+
+appearance:
+  unconditional_images_per_adapter: 16   # controller off, fixed seeds; same seeds for both adapters
+  seed_base: 77000
+  conditioned_images: 8                  # the 8 gate conditions with the controller on (qualitative)
+  pixel_stride: 8
+  quantiles: 1000
+  c1_validation_panel_frames: 8          # evenly spaced fixed C1 RGB-validation frames, shown as real references
+  # Pre-declared direction-of-effect checks on the 16+16 unconditional images, using the mean over
+  # R,G,B of the 1-D Wasserstein-1 distance between pixel-intensity distributions (lower = closer):
+  #   A1: W1(target-LoRA images, C1 validation) < W1(source-LoRA images, C1 validation)
+  #   A2: W1(source-LoRA images, source validation) < W1(target-LoRA images, source validation)
+  # Both must hold for the pixel-statistics check to count as supporting a learned appearance
+  # difference. The visual grid rubric (target images look like C1 frames, source images like
+  # SimCol3D; collapse/memorization/failures are noted, not hidden) is judged by the reviewer.
+  # Diversity (mean pairwise L1 at 64x64 between images of one set) is reported descriptively
+  # against the real sets; there is no threshold.
+
+# ---------------------------------------------------------------------------------------------
+# Appearance review (repair pass, declared 2026-10-19 before this analysis ran; generation/p4_eval.py
+# `reference`). Why: the first appearance check compared 16 target-LoRA images only with C1 VALIDATION
+# frames. C1 validation holds out whole families, so a mismatch could be family shift, collapse of the
+# LoRA, or memorisation of training frames. No training or tuning is done here; this only measures.
+# ---------------------------------------------------------------------------------------------
+appearance_review:
+  images_per_adapter: 64          # unconditional, controller off, seeds seed_base + j (first 16 = the earlier set)
+  reference_sets:                 # RGB only; C1 sets use the RGB-only loader (no depth/pose is indexed)
+    source_train: source_train
+    source_validation: source_validation
+    c1_train: target_appearance_train
+    c1_validation: target_appearance_validation
+  w1: {pixel_stride: 8, quantiles: 1000}    # same statistic as `appearance`, against all four reference sets
+  diversity: 'mean pairwise L1 at 64x64 over 64 images (real sets use 64 evenly spaced frames)'
+  nearest_neighbour:
+    features:                      # declared up front, no feature model is downloaded
+      latent: VAE posterior-mode latent (x scaling factor), average-pooled to 4x16x16 (1024-d), mean absolute difference
+      pixel: RGB area-downsampled to 64x64, mean absolute difference
+    queries: generated images of each adapter against that adapter's OWN training frames (source LoRA vs
+      source_train 4000, target LoRA vs c1_train 1895), and against the other domain's training set as a control
+    baselines: real held-out frames (source_validation, c1_validation) against the same training sets, and
+      leave-one-out nearest neighbours of 256 evenly spaced training frames within their own set (scale of
+      near-duplicate neighbouring frames in a thinned sequence)
+    statistic: mean, median, minimum, 5th and 95th percentile of the per-image nearest-neighbour distance
+  reading_guide: >
+    Interpretive aids, not pass/fail thresholds. MEMORISATION is supported only if generated images sit much
+    closer to training frames than real held-out frames do (generated median clearly below the held-out median,
+    minimum near the leave-one-out scale) in BOTH feature spaces. COLLAPSE is supported if generated diversity
+    is clearly below that of real train and validation sets AND the generated set is far from real frames of
+    the same domain, with its nearest neighbours not specific to individual training frames. FAMILY SHIFT
+    (validation families unlike training families) is supported if the target-LoRA images are closer to C1
+    TRAIN than to C1 VALIDATION by W1 while real C1 train vs real C1 validation is itself sizeable. Where the
+    evidence cannot separate explanations the report says so.

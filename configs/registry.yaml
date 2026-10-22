@@ -1,0 +1,20 @@
+# C2 evaluation registry SPEC -- TEMPLATE, NOT FROZEN.
+# This file only names the inputs. `scripts/build_registry.sh` (ACTION=build) hashes them into a DRAFT
+# registry (outputs/c2_campaign/registry.json, frozen: false); ACTION=freeze marks it frozen exactly once.
+# Register the FINAL method set before freezing: add G/M run directories below when those runs are
+# finished. A method omitted at freeze time cannot be added later without a new disclosed experiment.
+# All paths are repository-root relative. Z is the official pretrained head and has no run directory.
+schema_version: 1
+name: c2_campaign_v1
+output: outputs/c2_campaign/registry.json
+methods:
+  Z: null
+  R: outputs/runs/da3_R_seed0
+  A: outputs/runs/da3_A_seed0
+  G: outputs/runs/da3_G_seed0
+  M: outputs/runs/da3_M_seed0
+data:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  downstream_ids: outputs/manifests/milestone_v1/downstream_ids.json
+  target_test: outputs/manifests/milestone_v1/target_test.jsonl

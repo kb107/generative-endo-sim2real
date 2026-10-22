@@ -1,0 +1,77 @@
+# P5 reduced swap-diagnostic matrix (docs/implementation-plan.md P5, reduced 8-condition / 1-seed version).
+# EVERY rule below was written before the matrix was rendered. Do not edit a rule after seeing a result;
+# a change after results are seen is a new, disclosed analysis. Single seed, 8 conditions, one proxy model:
+# this is a reduced diagnostic matrix, not the 32-condition x 2-seed expansion (waits for a parent decision).
+schema_version: 1
+generator_config: configs/generator.yaml
+p4_config: configs/p4.yaml                    # conditions, partner pairing and paths of the P4 gate are reused
+output_dir: outputs/p5-diagnostics/matrix_reduced
+inputs:                                       # frozen P4 products; nothing is trained here
+  source_lora: outputs/p4-appearance/runs/source_lora/checkpoints/step_001000/lora_source.safetensors
+  target_lora: outputs/p4-appearance/runs/target_lora/checkpoints/step_001000/lora_target.safetensors
+  controller: outputs/p4-appearance/runs/controller_pilot/checkpoints/step_002000/controller.safetensors
+conditions:                                   # same selection rule as the P4 gate (no generations seen when chosen)
+  ids: reduced_gate_sample_ids                # 8 source-validation IDs, 4 per scene, median-depth rank endpoints
+  wrong_depth: reduced_gate_wrong_depth_permutation   # cross-scene reversed-rank derangement, no self match
+seed: 20261019                                # condition i uses seed + i in EVERY arm (paired initial noise)
+control_scale: 1.0
+adapters: [none, source, target]              # none = both LoRAs disabled (clean base weights)
+controls: ["off", correct, wrong]             # off = no controller; wrong = the partner condition's depth
+paired_across_arms: [initial_noise, prompt, scheduler, steps, guidance, control_scale, control_latent_encoding]
+# arms are named <adapter>_<control>: 9 arms x 8 conditions = 72 outputs. The control latent is the
+# deterministic VAE posterior mode, so condition-encoding randomness is identical by construction.
+
+tests:                                        # recorded in render.json; any failure is reported, never hidden
+  off_invariance: >
+    For every adapter, a render with the controller switched off must not depend on the nominal depth:
+    control=None, and control_scale=0 with the correct latents, and control_scale=0 with the wrong latents
+    must be bitwise equal (tolerance 0).
+  reproduction_of_p4: >
+    The source_correct / source_off / source_wrong arms use the same inputs as seed 0 of the P4 pilot step-2000
+    gate; their 8-bit PNGs are compared with outputs/p4-appearance/gate_runs/controller_pilot_step2000_validation.
+    Reported as the fraction of identical images and max abs difference; not a pass/fail gate.
+  weights_unchanged: every adapter and controller hash must be identical before and after all renders
+
+analysis:
+  proxy: >
+    Frozen official DA3Metric-Large head (generation/p4_proxy.py, DA3 venv, separate step, read-only),
+    median-scaled AbsRel (lower is better) against a reference depth; secondary: stride-4 Spearman.
+    Unit of analysis = condition. The proxy sees appearance as well as geometry, and it responds to shading
+    and surface gloss differently for different adapters. Therefore ONLY within-adapter differences are used for
+    decisions; absolute scores across adapters are reported but never used to rank adapters.
+  rules:
+    min_conditions: 7                         # of 8, same as the P4 gate
+    require_positive_mean_gain: true
+    audit_R0: >
+      On the real source-validation RGB the proxy must prefer the true depth over the partner's (>= 7/8),
+      else every check below is labelled UNINTERPRETABLE. (No audit is possible for target-style images:
+      C1 depth is forbidden. That limit is stated in the report.)
+    within_adapter:                           # evaluated separately for none, source, target
+      M1_correct_beats_off: err(A_correct, supplied depth_i) < err(A_off, depth_i)
+      M2_wrong_beats_off_against_supplied: err(A_wrong, supplied partner depth) < err(A_off, partner depth)
+      M3_wrong_tracks_supplied_not_original: err(A_wrong, partner depth) < err(A_wrong, original depth_i)
+      M4_correct_beats_wrong_against_original: err(A_correct, original depth_i) < err(A_wrong, original depth_i)
+    control_retained_under_adapter: M1 and M3 and M4 each hold in >= min_conditions with a positive mean gain
+      (the same three checks as the P4 gate R1-R3; M2 is reported and not required)
+    swap_verdict: >
+      The control is retained under the TARGET adapter (the swap) iff the target adapter satisfies
+      control_retained_under_adapter and R0 holds. Otherwise it is not established (FAIL if the target
+      adapter fails M1, M3 or M4; the report names which). The source adapter and the base (none) serve as
+      references, not as pass requirements.
+    retention_comparison: >
+      Reported without a threshold: per-measure mean gains for target vs source and their ratio, and the
+      per-condition paired differences (source gain - target gain) with the number of conditions where the
+      target gain is larger. No ratio cut-off is declared, so no "how much retained" verdict is issued.
+    original_depth_in_shuffled_comparisons: >
+      For the wrong arm, scores against the ORIGINAL depth (the depth the nominal condition would have
+      supplied) are reported next to the scores against the SUPPLIED depth (M3, M4), per adapter.
+  failure_panel_rule: >
+    Rank all 24 (adapter, condition) cells by the M1 gain (err_off - err_correct) ascending and show the
+    6 lowest, regardless of sign, each as one row: real RGB, supplied control, off, correct, wrong, wrong's
+    supplied control. Nothing else is selected after seeing images.
+  panels: >
+    8-row panels, one row per condition in the fixed order, 256-px square tiles, same display geometry
+    (no crop, same resize) for real RGB, control images and generations (source geometry is square 512).
+  visual_judgement: >
+    No visual verdict is issued by the implementer. The panels are saved for blind rating by the coordinator.
+scope_boundary: no bulk generation of the downstream images, no 32 x 2 expansion, no DA3 G/M training

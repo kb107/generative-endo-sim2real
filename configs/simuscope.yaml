@@ -1,0 +1,45 @@
+# SimuScope-style baseline: a diffusers re-implementation of the official SimuScope pipeline
+# (Martyniak et al., WACV 2025, arXiv 2412.02332; github SanoScience/SimuScope), NOT the official
+# AUTOMATIC1111 run. Values are the official ones (README training commands, Inference/api_inference.ipynb)
+# unless listed in docs/baseline-simuscope.md under deviations.
+method: SimuScope-style
+base:
+  model_id: stable-diffusion-v1-5/stable-diffusion-v1-5   # official: v1-5-pruned.safetensors (same SD1.5 weights)
+  revision: 451f4fe16113bff5a5d2269ed5ad43b0592e9a14
+controlnets:                       # official: ControlNet++ SD1.5 fp16 (huchenlei collection), HED soft-edge and depth
+  repo: huchenlei/ControlNet_plus_plus_collection_fp16
+  revision: 8fff22e705dc2645eb10fb2179f55be22f7a6970
+  softedge_file: controlnet++_hed_softedge_sd15_fp16.safetensors
+  depth_file: controlnet++_depth_sd15_fp16.safetensors
+  architecture_config: {repo: lllyasviel/control_v11p_sd15_softedge, revision: b5bcad0c48e9b12f091968cf5eadbb89402d6bc9}
+annotators:                        # official: A1111 softedge_hedsafe and depth_midas (dpt_hybrid), processor_res 512
+  repo: lllyasviel/Annotators
+  revision: 982e7edaec38759d914a963c48c4726685de7d96
+  hed_safe: true
+style_lora:
+  manifest: outputs/manifests/milestone_v1/target_appearance_train.jsonl   # C1 train, RGB only
+  frames: 85                       # paper: fewer than 85 real frames
+  caption: an endoscopic view of the colon lumen
+  repeats: 1                       # kohya img folder "<repeats>_<name>"; the official value is not published
+  seed: 0
+  max_train_steps: 13920           # official value
+  work_dir: outputs/baselines_simuscope/style_lora
+  output_name: c1_style
+  kohya_root: external/kohya/sd-scripts      # tag v0.8.4: train_network.py identical to the official copy
+  kohya_python: external/kohya/.venv/bin/python
+inference:
+  prompt: an endoscopic view of the colon lumen
+  negative_prompt: ''
+  steps: 20
+  scheduler: DPM++ 2M Karras       # diffusers DPMSolverMultistepScheduler(dpmsolver++, order 2, karras sigmas)
+  denoising_strength: 0.65
+  cfg_scale: 7.0
+  softedge_weight: 0.45
+  depth_weight: 0.65
+  lora_weight: 0.45
+  seed: 420420                     # official: one fixed seed for every image
+  precision: float16
+output:
+  out_root: outputs
+  production_dir: generated_baselines/simuscope
+  smoke_dir: generated_baselines/simuscope_smoke

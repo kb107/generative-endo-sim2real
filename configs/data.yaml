@@ -1,0 +1,38 @@
+# Paths are relative to DATA_ROOT; generated files stay under outputs/.
+schema_version: 1
+caption: an endoscopic view of the colon lumen
+output_directory: outputs/manifests/milestone_v1
+source:
+  directory: SimCol3D
+  validation_sequences:
+    - SyntheticColon_I/Frames_S14
+    - SyntheticColon_II/Frames_B14
+  train_stride: 6
+  train_cap: 4000
+  validation_stride: 10
+  validation_cap: 200
+target:
+  directory: C3VDv2
+  versions: [v1, v2]
+  textures: [t1, t2, t3, t4]
+  quality_scores: [1, 2]
+  validation_families: [ascending_t2, cecum_t1, descending_t4, sigmoid1_t3]
+  train_stride: 8
+  train_cap: 2000
+  validation_stride: 10
+  validation_cap: 250
+  test_stride: 5
+  rectified_hw: [504, 630]
+  focal_px: 300.0
+generation_size: 512
+depth_encoding:
+  near_quantile: 0.01
+  far_quantile: 0.99
+  fit_frames: 128
+  pixels_per_frame: 4096
+  invalid_fill: 0.0
+diagnostics:
+  conditions: 32
+  seeds: [17, 43]
+smoke:
+  frames_per_split: 2
