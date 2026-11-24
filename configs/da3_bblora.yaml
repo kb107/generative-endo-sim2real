@@ -1,0 +1,50 @@
+# bbLoRA variant of configs/da3.yaml: identical training lock, but rank-8 LoRA on attention qkv/proj of the last 4
+# backbone blocks is trained next to the DPT head (one optimizer, one learning rate, joint gradient clipping).
+# Opt in with CONFIG=configs/da3_bblora.yaml bash scripts/train_da3.sh (run name da3_<MODE>_bblora_seed<SEED>).
+schema_version: 1
+purpose: experiment
+model:
+  da3_revision: 3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
+  checkpoint: depth-anything/DA3METRIC-LARGE
+  checkpoint_revision: 4010e39f3634a45bc60553321fb49fb760bd594e
+  process_hw: [504, 504]
+  trainable: head+backbone_lora
+  canonical_focal_px: 300.0
+  backbone_lora:
+    rank: 8
+    alpha: 8
+    last_k_blocks: 4
+    targets: [attn.qkv, attn.proj]
+data:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  matched_ids: outputs/manifests/milestone_v1/downstream_ids.json
+  mode: R
+  generated_manifest: null
+  outputs_root: outputs
+  augmentation:
+    brightness: [0.9, 1.1]
+    color: [0.9, 1.1]
+    gamma: [0.9, 1.1]
+training:
+  seed: 0
+  optimizer_steps: 3000
+  global_batch_size: 16
+  microbatch_size: 2
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_steps: 100
+  gradient_clip_norm: 1.0
+  validation_every: 250
+  checkpoint_every: 250
+  depth_weight: 1.0
+  gradient_weight: 1.0
+  precision: float32
+  optimizer: AdamW
+  schedule: warmup_cosine
+  world_size: 1
+evaluation:
+  selection: source_validation_sequence_macro_raw_abs_rel
+  prediction_resize: bilinear_align_corners_false
+  target_views: []
+  validation_frames: null

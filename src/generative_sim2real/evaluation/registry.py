@@ -11,24 +11,35 @@ Commands: ``python -m generative_sim2real.evaluation.registry {build,freeze,veri
 from __future__ import annotations
 import argparse
 import datetime
+import fnmatch
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
+import re
 
 EVALUATOR_VERSION = 'c2_locked_eval_v1'
-METHOD_ORDER = ('Z', 'R', 'A', 'G', 'M')
+METHOD_ORDER = ('Z', 'R', 'A', 'G', 'M')          # the original campaign's names (legacy 'declared absent' listing)
+METHOD_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9_+.-]{0,39}$')
+HEAD_CHOICES = ('best', 'last')
+MODES = ('R', 'A', 'G', 'M')
 SELECTION = 'source_validation_sequence_macro_raw_abs_rel'
+FINAL_STEP_SELECTION = 'final_step_of_completed_run (no selection; source-validation AbsRel reported for reference)'
 TARGET_GEOMETRY = 'target_rectified_full'
 TARGET_HW = [504, 630]
-# Only these fields may vary between R/A/G/M training configs (see depth/train.py LOCKED_EXPERIMENT).
+# Only these fields may vary between the trained methods' configs (see depth/train.py LOCKED_EXPERIMENT). audit_run
+# separately pins every run's model block to exactly the head-only or the bbLoRA variant, so those two keys may differ.
 VARYING_CONFIG_FIELDS = (('data', 'mode'), ('data', 'generated_manifest'),
-                         ('training', 'microbatch_size'), ('training', 'checkpoint_every'))
+                         ('training', 'microbatch_size'), ('training', 'checkpoint_every'), ('training', 'seed'),
+                         ('model', 'trainable'), ('model', 'backbone_lora'))
 CODE_GLOBS = ('src/generative_sim2real/__init__.py', 'src/generative_sim2real/data/*.py',
               'src/generative_sim2real/depth/*.py', 'src/generative_sim2real/evaluation/*.py')
 SPEC_KEYS = {'schema_version', 'name', 'output', 'methods', 'data'}
+# Optional spec key: files (relative to src/generative_sim2real) that may differ from the hashes recorded in a run's
+# resolved.json. Each affected run records the old/new hashes in the registry. Absent = any change is refused.
+SPEC_OPTIONAL_KEYS = {'code_changes_since_training'}
 SPEC_DATA_KEYS = {'source_train', 'source_validation', 'downstream_ids', 'target_test'}
 
 def protocol_section() -> dict:
@@ -307,9 +318,10 @@ def describe_data(spec, root, generated) -> dict:
 
 # ---------------------------------------------------------------- run selection audit
 
-def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=None) -> dict:
-    """Prove that a trained head was selected by source validation only, and fingerprint the run."""
-    from ..depth.checkpoints import read_head
+def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=None, head_choice='best') -> dict:
+    """Prove that a trained head was selected by source validation only (``best``) or is the final step of a
+    completed run (``last``), and fingerprint the run."""
+    from ..depth.checkpoints import read_final_training, read_head
     root = Path(root)
     run = root / run_dir
     problems = []
@@ -333,8 +345,11 @@ def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=N
     if set(config.get('data', {})) != {'source_train', 'source_validation', 'matched_ids', 'mode', 'generated_manifest',
                                        'outputs_root', 'augmentation'}:
         fail('run config has unexpected dataset fields (target dataset interface?)')
-    if config['data'].get('mode') != name:
-        fail(f'run mode {config["data"].get("mode")!r} does not match method name')
+    mode = config['data'].get('mode')
+    if name in MODES and mode != name:
+        fail(f'run mode {mode!r} does not match method name')      # the legacy names R/A/G/M pin the RGB mode
+    elif mode not in MODES:
+        fail(f'run mode {mode!r} is not one of {MODES}')
     for key, spec_key in (('source_train', 'source_train'), ('source_validation', 'source_validation'),
                           ('matched_ids', 'downstream_ids')):
         if config['data'].get(key) != spec_data[spec_key]:
@@ -343,15 +358,34 @@ def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=N
         fail('run did not complete its scheduled updates')
     if status['selected_step'] != state['best_step']:
         fail('status selected_step differs from the recorded best step')
-    # Heads: best.pt must be exactly the source-validation-selected head recorded in the run state.
-    head_path = run / 'best.pt'
-    head = read_head(head_path)
-    if head['head_sha256'] != state['best_head_sha256'] or head['selected_step'] != state['best_step']:
-        fail('best.pt is not the head selected by source validation (digest or step mismatch)')
+    total = config['training']['optimizer_steps']
+    lora_variant = config['model'].get('trainable') == 'head+backbone_lora'
+    if head_choice == 'best':
+        # best.pt must be exactly the source-validation-selected head recorded in the run state.
+        head_path = run / 'best.pt'
+        head = read_head(head_path, allow_backbone_lora=True)
+        if head['head_sha256'] != state['best_head_sha256'] or head['selected_step'] != state['best_step']:
+            fail('best.pt is not the head selected by source validation (digest or step mismatch)')
+        if lora_variant and head.get('backbone_lora_sha256') != state.get('best_backbone_lora_sha256'):
+            fail('best.pt backbone LoRA is not the one selected by source validation (digest mismatch)')
+    else:
+        # last.pt must be the training checkpoint written at the final step of the completed run.
+        head_path = run / 'last.pt'
+        head = read_final_training(head_path)
+        if head['selected_step'] != total or status['completed_steps'] != total:
+            fail(f'last.pt is at step {head["selected_step"]}, not the final step {total} of a completed run')
+        if json.loads(json.dumps(head['state'])) != state:
+            fail('last.pt training state differs from the final state recorded in status.json')
+        if head['state']['cursor'] != total * config['training']['global_batch_size']:
+            fail('last.pt sample cursor does not match the completed updates')
     if head['compatibility'] != {k: v for k, v in resolved.items()}:
-        fail('best.pt compatibility record differs from resolved.json')
+        fail(f'{head_path.name} compatibility record differs from resolved.json')
     if head['compatibility']['smoke_only']:
-        fail('best.pt is a smoke head')
+        fail(f'{head_path.name} is a smoke head')
+    if lora_variant != ('backbone_lora_state_dict' in head):
+        fail(f'{head_path.name} backbone-LoRA state does not match the run configuration (model.trainable)')
+    if lora_variant and head.get('backbone_lora_config') != config['model'].get('backbone_lora'):
+        fail(f'{head_path.name} backbone-LoRA settings differ from the run configuration')
     if official_head_sha256 and state.get('initial_head_sha256') != official_head_sha256:
         fail('run did not start from the official pretrained head (initial_head_sha256 differs)')
     # Validation reports: every one is source-only; best step is the first strict argmin of sequence-macro raw AbsRel.
@@ -384,24 +418,32 @@ def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=N
     for path, expected in resolved['files_sha256'].items():
         if not (root / path).is_file() or sha256_file(root / path) != expected:
             fail(f'training input changed since training: {path}')
-    # Training-time source code (data/depth/evaluation) must be unchanged.
-    changed = [k for k, v in resolved['code_sha256'].items()
-               if not (root / 'src/generative_sim2real' / k).is_file() or sha256_file(root / 'src/generative_sim2real' / k) != v]
-    if changed:
-        fail(f'source files changed since training: {sorted(changed)[:4]}')
+    # Training-time source code (data/depth/evaluation) must be unchanged, except for files the spec declares.
+    now = lambda k: (sha256_file(root / 'src/generative_sim2real' / k)
+                     if (root / 'src/generative_sim2real' / k).is_file() else None)
+    changed = {k: {'at_training': v, 'now': now(k)} for k, v in resolved['code_sha256'].items() if now(k) != v}
+    allowed = set(spec_data.get('_code_changes_since_training') or ())
+    undeclared = sorted(set(changed) - allowed)
+    if undeclared:
+        fail(f'source files changed since training: {undeclared[:4]}')
     from ..depth import model as depth_model
     expected_model = {'da3_revision': depth_model.DA3_REVISION, 'checkpoint': depth_model.CHECKPOINT,
                       'checkpoint_revision': depth_model.CHECKPOINT_REVISION, 'process_hw': [504, 504],
                       'trainable': 'head', 'canonical_focal_px': 300.}
-    if config['model'] != expected_model:
-        fail('run used a different base model protocol')
+    expected_bblora = {**expected_model, 'trainable': 'head+backbone_lora',
+                       'backbone_lora': depth_model.LOCKED_BACKBONE_LORA}
+    if config['model'] != expected_model and json.dumps(config['model'], sort_keys=True) != json.dumps(
+            expected_bblora, sort_keys=True):
+        fail('run used a different base model protocol (neither head-only nor the locked head+backbone_lora)')
     if problems:
         raise RegistryError('; '.join(problems))
-    return {'name': name, 'kind': 'trained', 'run_dir': str(run_dir), 'mode': config['data']['mode'],
-            'head': {'path': str(Path(run_dir) / 'best.pt'), 'file_sha256': sha256_file(head_path),
+    record = {'name': name, 'kind': 'trained', 'run_dir': str(run_dir), 'mode': config['data']['mode'],
+            'training_seed': config['training']['seed'], 'trainable': config['model']['trainable'],
+            'head': {'path': str(Path(run_dir) / head_path.name), 'file_sha256': sha256_file(head_path),
                      'head_sha256': head['head_sha256']},
-            'selected_step': state['best_step'], 'source_validation_sequence_macro_abs_rel': state['best_abs_rel'],
-            'selection': SELECTION, 'target_views': [],
+            'selected_step': state['best_step'] if head_choice == 'best' else total,
+            'source_validation_sequence_macro_abs_rel': state['best_abs_rel'] if head_choice == 'best' else reports[total][0],
+            'selection': SELECTION if head_choice == 'best' else FINAL_STEP_SELECTION, 'target_views': [],
             'resolved_config_sha256': digest(config),
             'run_files_sha256': {'resolved.json': sha256_file(run / 'resolved.json'),
                                  'status.json': sha256_file(run / 'status.json'),
@@ -412,12 +454,20 @@ def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=N
             'training_environment': resolved['environment'],
             'generated_manifest': config['data']['generated_manifest'],
             '_comparison_config': _comparable_config(config)}
+    # Optional blocks appear only when used, so registries of head-only/best-head specs keep their original shape.
+    if head_choice != 'best':
+        record['head_choice'] = head_choice
+    if lora_variant:
+        record['backbone_lora'] = {'config': config['model']['backbone_lora'], 'sha256': head['backbone_lora_sha256']}
+    if changed:
+        record['training_code_changes'] = dict(sorted(changed.items()))
+    return record
 
 
 def _comparable_config(config):
     config = json.loads(json.dumps(config))
     for group, key in VARYING_CONFIG_FIELDS:
-        config[group].pop(key)
+        config[group].pop(key, None)
     return config
 
 
@@ -429,28 +479,70 @@ def load_spec(path) -> dict:
     return check_spec(spec)
 
 
+def parse_method(name, value):
+    """(run_dir, head_choice) of one spec method entry; (None, None) for the official pretrained head."""
+    if not isinstance(name, str) or not METHOD_NAME.match(name):
+        raise RegistryError(f'Method name {name!r} must match {METHOD_NAME.pattern}')
+    if value is None:
+        if name != 'Z':
+            raise RegistryError(f'{name}: only the official pretrained head Z may have a null entry; trained methods need a run directory')
+        return None, None
+    if name == 'Z':
+        raise RegistryError('Z is reserved for the official pretrained head and must be null')
+    if isinstance(value, str) and value:
+        return value, 'best'
+    if isinstance(value, dict) and set(value) <= {'run_dir', 'head'} and 'run_dir' in value:
+        run_dir, head = value['run_dir'], value.get('head', 'best')
+        if isinstance(run_dir, str) and run_dir and head in HEAD_CHOICES:
+            return run_dir, head
+    raise RegistryError(f'{name}: entry must be a run directory string or {{run_dir: ..., head: best|last}}')
+
+
 def check_spec(spec) -> dict:
-    if not isinstance(spec, dict) or set(spec) != SPEC_KEYS or spec['schema_version'] != 1:
-        raise RegistryError(f'Registry spec must have exactly the keys {sorted(SPEC_KEYS)} and schema_version 1')
+    keys = set(spec) if isinstance(spec, dict) else set()
+    if not isinstance(spec, dict) or not SPEC_KEYS <= keys <= SPEC_KEYS | SPEC_OPTIONAL_KEYS or spec['schema_version'] != 1:
+        raise RegistryError(f'Registry spec must have exactly the keys {sorted(SPEC_KEYS)} (optional: '
+                            f'{sorted(SPEC_OPTIONAL_KEYS)}) and schema_version 1')
     methods = spec['methods']
     if not isinstance(methods, dict) or 'Z' not in methods or methods['Z'] is not None:
         raise RegistryError('Spec methods must include Z (official pretrained) with no run directory')
-    if not set(methods) <= set(METHOD_ORDER) or len(methods) < 2:
-        raise RegistryError('Method names must be among Z,R,A,G,M with at least one trained method')
-    if any(methods[m] is None for m in methods if m != 'Z'):
-        raise RegistryError('Trained methods need a run directory')
+    for name, value in methods.items():
+        parse_method(name, value)
+    if len(methods) < 2:
+        raise RegistryError('Spec needs at least one trained method besides Z')
+    if len({m.lower() for m in methods}) != len(methods):
+        raise RegistryError('Method names must be unique ignoring case (they name result directories)')
+    changes = spec.get('code_changes_since_training', [])
+    if not isinstance(changes, list) or any(not isinstance(c, str) or c.startswith('/') or '..' in c for c in changes):
+        raise RegistryError('code_changes_since_training must be a list of paths relative to src/generative_sim2real')
+    scope = [g[len('src/generative_sim2real/'):] for g in CODE_GLOBS]
+    outside = [c for c in changes if not any(fnmatch.fnmatchcase(c, g) and c.count('/') == g.count('/') for g in scope)]
+    if outside:
+        raise RegistryError(f'code_changes_since_training entries outside the hashed code scope {scope}: {outside[:4]}')
     if set(spec['data']) != SPEC_DATA_KEYS:
         raise RegistryError(f'Spec data needs exactly {sorted(SPEC_DATA_KEYS)}')
     return spec
 
 
-def build_content(spec, root, code_root, digests) -> dict:
-    """Everything the registry asserts, read from disk (never from the previous registry)."""
+def build_content(spec, root, code_root, digests, method_order=None) -> dict:
+    """Everything the registry asserts, read from disk (never from the previous registry).
+
+    The method order is the spec order. A stored registry file has its keys sorted, so ``verify_registry`` passes
+    the stored ``method_names`` back in as ``method_order`` (it must be a permutation of the spec's methods).
+    """
     root = Path(root)
     spec = check_spec(spec)
-    methods = [m for m in METHOD_ORDER if m in spec['methods']]
+    methods = list(spec['methods'] if method_order is None else method_order)
+    if sorted(methods) != sorted(spec['methods']):
+        raise RegistryError('Registry method_names are not the spec methods')
     probe = {'_source_validation_count': describe_manifest(spec['data']['source_validation'], root,
                                                            split='source_validation')['count'], **spec['data']}
+    missing = [c for c in spec.get('code_changes_since_training', [])
+               if not (Path(code_root) / 'src/generative_sim2real' / c).is_file()]
+    if missing:
+        raise RegistryError(f'code_changes_since_training lists files that do not exist: {missing[:4]}')
+    if spec.get('code_changes_since_training'):
+        probe['_code_changes_since_training'] = list(spec['code_changes_since_training'])
     ids = read_json(root / spec['data']['downstream_ids'])['sample_ids']
     records, generated, baseline = [], {}, None
     for name in methods:
@@ -458,19 +550,26 @@ def build_content(spec, root, code_root, digests) -> dict:
             records.append({'name': 'Z', 'kind': 'official', 'run_dir': None, 'head': None, 'selected_step': None,
                             'selection': 'none (official pretrained head, never trained here)', 'target_views': []})
             continue
-        record = audit_run(spec['methods'][name], name, root, probe, ids, (digests or {}).get('official_head_sha256'))
+        run_dir, head_choice = parse_method(name, spec['methods'][name])
+        record = audit_run(run_dir, name, root, probe, ids, (digests or {}).get('official_head_sha256'), head_choice)
         comparable = record.pop('_comparison_config')
         baseline = baseline or comparable
         if comparable != baseline:
-            raise RegistryError(f'{name}: training configuration differs from the other methods beyond mode/generated manifest')
-        if (name in ('G', 'M')) != (record['generated_manifest'] is not None):
+            raise RegistryError(f'{name}: training configuration differs from the other methods beyond mode/generated manifest/seed/model variant')
+        if (record['mode'] in ('G', 'M')) != (record['generated_manifest'] is not None):
             raise RegistryError(f'{name}: generated manifest is required for G/M only')
         if record['generated_manifest']:
             generated[name] = record['generated_manifest']
         records.append(record)
+    legacy_names = set(methods) <= set(METHOD_ORDER)
+    trained = [r for r in records if r['kind'] == 'trained']
+    if legacy_names and len({(r['training_seed'], r['trainable']) for r in trained}) > 1:
+        raise RegistryError('Methods named only Z/R/A/G/M must come from runs with one training seed and one model '
+                            'variant; use descriptive method names (e.g. G_s1, G_bblora) for mixed seeds or variants')
+    legacy = set(methods) <= set(METHOD_ORDER)         # 'declared absent' is only meaningful for the original names
     return {'schema_version': 1, 'kind': 'c2_evaluation_registry', 'name': spec['name'],
             'evaluator_version': EVALUATOR_VERSION, 'spec': spec,
-            'method_names': methods, 'declared_absent_methods': [m for m in METHOD_ORDER if m not in methods],
+            'method_names': methods, 'declared_absent_methods': [m for m in METHOD_ORDER if m not in methods] if legacy else [],
             'methods': records, 'base': base_section(digests), 'data': describe_data(spec, root, generated),
             'code': code_manifest(code_root), 'protocol': protocol_section(), 'disclosures': list(DISCLOSURES)}
 
@@ -532,7 +631,7 @@ def verify_registry(path_or_registry, root, *, code_root=None, require_frozen=Tr
         else:
             problems.extend(diff({k: base.get(k) for k in actual}, actual, '/base(recomputed from weights file)'))
     try:
-        rebuilt = build_content(registry['spec'], root, code_root or root, registry['base'])
+        rebuilt = build_content(registry['spec'], root, code_root or root, registry['base'], registry.get('method_names'))
     except Exception as error:      # any failure to re-derive an input is a refusal
         problems.append(f'inputs cannot be re-verified: {error}')
     else:

@@ -7,6 +7,7 @@ prefetch or worker RNG is involved; occurrence cursor advances only on updates.
 """
 from __future__ import annotations
 import argparse
+import contextlib
 import copy
 from importlib import metadata
 import json
@@ -20,6 +21,7 @@ import subprocess
 
 import numpy as np
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 import yaml
 
 from ..data.collate import collate_frame_samples
@@ -28,16 +30,22 @@ from ..data.rgb_modes import AUGMENTATION, RGBModeDataset, OccurrenceOrder, file
 from ..evaluation.depth import evaluate_source, validation_indices, write_report
 from .checkpoints import atomic_replace, atomic_write_json, head_digest, load_training, read_head, save_head, save_training
 from .loss import canonical_depth_loss, mask_counts, validate_targets
-from .model import CHECKPOINT, CHECKPOINT_REVISION, DA3_REVISION, DA3MetricDepth, verify_upstream_checkout
+from .model import (CHECKPOINT, CHECKPOINT_REVISION, DA3_REVISION, LOCKED_BACKBONE_LORA, DA3MetricDepth,
+                    verify_upstream_checkout)
 
 
 TRAINING_KEYS = {'seed', 'optimizer_steps', 'global_batch_size', 'microbatch_size', 'learning_rate', 'weight_decay',
                  'warmup_steps', 'gradient_clip_norm', 'validation_every', 'checkpoint_every', 'depth_weight',
                  'gradient_weight', 'precision', 'optimizer', 'schedule', 'world_size'}
-# Every experiment run (R/A/G/M) must share these exactly. Only data.mode and data.generated_manifest vary;
+# Every experiment run (R/A/G/M) must share these exactly. Only data.mode, data.generated_manifest and the seed
+# (one of EXPERIMENT_SEEDS; added 2026-11-21 for variance estimates, disclosed) vary;
 # microbatch_size and checkpoint_every are execution details that do not change the logical batch or schedule.
+EXPERIMENT_SEEDS = (0, 1, 2)
+# The only two permitted model variants: the head-only protocol (default) and the opt-in bbLoRA variant (LoRA on the
+# attention qkv/proj of the last 4 backbone blocks next to the trainable head; configs/da3_bblora.yaml).
+BACKBONE_LORA = LOCKED_BACKBONE_LORA
 LOCKED_EXPERIMENT = {
-    'training': {'seed': 0, 'optimizer_steps': 3000, 'global_batch_size': 16, 'learning_rate': 1e-4,
+    'training': {'optimizer_steps': 3000, 'global_batch_size': 16, 'learning_rate': 1e-4,
                  'weight_decay': 0.01, 'warmup_steps': 100, 'gradient_clip_norm': 1.0, 'validation_every': 250,
                  'depth_weight': 1.0, 'gradient_weight': 1.0, 'precision': 'float32', 'optimizer': 'AdamW',
                  'schedule': 'warmup_cosine', 'world_size': 1},
@@ -46,9 +54,11 @@ LOCKED_EXPERIMENT = {
              'matched_ids': 'outputs/manifests/milestone_v1/downstream_ids.json', 'outputs_root': 'outputs'}}
 
 
-def apply_rgb_overrides(config, mode=None, generated_manifest=None):
+def apply_rgb_overrides(config, mode=None, generated_manifest=None, seed=None):
     """The only per-run variation allowed across R/A/G/M, applied to a copy of the shared config."""
     config = copy.deepcopy(config)
+    if seed is not None:
+        config['training']['seed'] = seed
     if mode is not None:
         config['data']['mode'] = mode
     if generated_manifest is not None:
@@ -66,8 +76,10 @@ def validate_config(config):
     expected = {'da3_revision': DA3_REVISION, 'checkpoint': CHECKPOINT,
                 'checkpoint_revision': CHECKPOINT_REVISION, 'process_hw': [504, 504],
                 'trainable': 'head', 'canonical_focal_px': 300.}
-    if model != expected:
-        raise ValueError('DA3 model must use the identical official metric base and 504-square head-only protocol')
+    bblora = {**expected, 'trainable': 'head+backbone_lora', 'backbone_lora': BACKBONE_LORA}
+    if model != expected and json.dumps(model, sort_keys=True) != json.dumps(bblora, sort_keys=True):
+        raise ValueError('DA3 model must use the identical official metric base and 504-square protocol, '
+                         'head-only or head+backbone_lora with the locked adapter settings')
     frames = evaluation.get('validation_frames') if isinstance(evaluation, dict) else None
     if evaluation != {'selection': 'source_validation_sequence_macro_raw_abs_rel',
                       'prediction_resize': 'bilinear_align_corners_false', 'target_views': [],
@@ -103,6 +115,8 @@ def validate_config(config):
     if train['validation_every'] % train['checkpoint_every']:
         raise ValueError('checkpoint_every must divide validation_every')
     if not smoke:
+        if train['seed'] not in EXPERIMENT_SEEDS:
+            raise ValueError(f'Experiment seeds are limited to {EXPERIMENT_SEEDS}')
         for group, values in LOCKED_EXPERIMENT.items():
             if any(config[group][key] != value or type(config[group][key]) is not type(value) for key, value in values.items()):
                 raise ValueError('Experiment settings are locked across R/A/G/M; changes need a shared protocol update')
@@ -209,15 +223,19 @@ def _verify_best(output, model, state, run_compatibility):
     """Tie best.pt to the training state by content, repairing only a crash after last.pt."""
     path = output / 'best.pt'
     try:
-        best = read_head(path)
+        best = read_head(path, allow_backbone_lora=model.backbone_lora is not None)
         intact = (best['compatibility'] == run_compatibility and best['selected_step'] == state['best_step']
-                  and best['head_sha256'] == state['best_head_sha256'])
+                  and best['head_sha256'] == state['best_head_sha256']
+                  and best.get('backbone_lora_sha256') == state.get('best_backbone_lora_sha256'))
     except FileNotFoundError:
         intact = False
     if intact:
         return
     # last.pt is written first; when it records a new best, its head is that best head.
-    if state['best_step'] == state['optimizer_step'] and head_digest(model.head_state_dict()) == state['best_head_sha256']:
+    lora_matches = (model.backbone_lora is None
+                    or head_digest(model.backbone_lora_state_dict()) == state['best_backbone_lora_sha256'])
+    if (state['best_step'] == state['optimizer_step'] and head_digest(model.head_state_dict()) == state['best_head_sha256']
+            and lora_matches):
         save_head(path, model, state, run_compatibility)
         return
     raise ValueError('Resume best head does not match the training checkpoint (missing or changed)')
@@ -228,8 +246,17 @@ def train(model, dataset, validation, config, output, run_compatibility, *, devi
     """Run complete updates, then source-select/save at step zero and intervals.
 
     ``stop_after_step`` supports an interruption/restart smoke while retaining
-    the original total schedule in the resume fingerprint.
+    the original total schedule in the resume fingerprint. The bbLoRA variant back-propagates through
+    attention, whose fused flash/memory-efficient backward kernels are nondeterministic; it therefore runs
+    with the (deterministic) math SDPA backend so that exact resume holds. Head-only runs are untouched.
     """
+    lora = config['model']['trainable'] == 'head+backbone_lora'
+    with sdpa_kernel(SDPBackend.MATH) if lora else contextlib.nullcontext():
+        return _train(model, dataset, validation, config, output, run_compatibility, device=device, resume=resume,
+                      stop_after_step=stop_after_step, evaluate=evaluate)
+
+
+def _train(model, dataset, validation, config, output, run_compatibility, *, device, resume, stop_after_step, evaluate):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if not run_compatibility['smoke_only'] and stop_after_step is not None:
@@ -242,11 +269,17 @@ def train(model, dataset, validation, config, output, run_compatibility, *, devi
     if resume is None and (output / 'last.pt').exists():
         raise ValueError('Existing run requires explicit resume or a new output directory')
     model.to(device)
-    parameters = model.configure_head_training()
+    use_lora = config['model']['trainable'] == 'head+backbone_lora'
+    if use_lora:
+        parameters = model.configure_backbone_lora_training(config['model']['backbone_lora'], seed=settings['seed'])
+    else:
+        parameters = model.configure_head_training()
     optimizer = torch.optim.AdamW(parameters, lr=settings['learning_rate'], weight_decay=settings['weight_decay'])
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: learning_rate_factor(step, total, settings['warmup_steps']))
     state = {'optimizer_step': 0, 'cursor': 0, 'best_abs_rel': float('inf'), 'best_step': -1,
              'best_head_sha256': None, 'initial_head_sha256': head_digest(model.head_state_dict())}
+    if use_lora:
+        state.update(best_backbone_lora_sha256=None, initial_backbone_lora_sha256=head_digest(model.backbone_lora_state_dict()))
     indices = validation_indices(len(validation), config['evaluation']['validation_frames'])
     if resume is not None:
         state = load_training(resume, model, optimizer, scheduler, run_compatibility)
@@ -274,6 +307,8 @@ def train(model, dataset, validation, config, output, run_compatibility, *, devi
         if improved:
             state.update(best_abs_rel=score, best_step=state['optimizer_step'],
                          best_head_sha256=head_digest(model.head_state_dict()))
+            if use_lora:
+                state['best_backbone_lora_sha256'] = head_digest(model.backbone_lora_state_dict())
         # Training state first: a crash before best.pt is repaired from its head on resume.
         save_training(output / 'last.pt', model, optimizer, scheduler, dict(state), run_compatibility)
         if improved:
@@ -330,8 +365,10 @@ def main():
     parser.add_argument('--stop-after-step', type=int)
     parser.add_argument('--mode', choices=['R', 'A', 'G', 'M'], help='RGB mode; overrides the shared config')
     parser.add_argument('--generated-manifest', help='Generated manifest for G/M ("" for none)')
+    parser.add_argument('--seed', type=int, help='training seed override (experiments: one of EXPERIMENT_SEEDS)')
     args = parser.parse_args()
-    config = apply_rgb_overrides(yaml.safe_load(Path(args.config).read_text()), args.mode, args.generated_manifest)
+    config = apply_rgb_overrides(yaml.safe_load(Path(args.config).read_text()), args.mode, args.generated_manifest,
+                                 args.seed)
     validate_config(config)
     if torch.device(args.device).type == 'cuda':
         if not torch.cuda.is_available():

@@ -1,4 +1,4 @@
-"""Per-method reports and the Z/R/A/G/M comparison tables for the locked C2 campaign.
+"""Per-method reports and the comparison tables (any registered method list) for the locked C2 campaign.
 
 Headline columns are raw (unaligned) metric predictions aggregated with equal
 weight per sequence. The GT-median-scaled RMSE is an oracle diagnostic and is
@@ -16,8 +16,8 @@ RAW_METRICS = ('abs_rel', 'rmse_mm', 'delta_1_1', 'delta_1_25')
 STAT_FIELDS = ('abs_rel_sum', 'squared_error_sum_m2', 'delta_1_1_count', 'delta_1_25_count',
                'oracle_squared_error_sum_m2')
 FRAME_FIELDS = ('sample_id', 'sequence_id', 'status', 'failure', 'valid_pixels', 'bad_prediction_pixels',
-                *METRICS, 'oracle_median_scale', *STAT_FIELDS)
-ORDER = ('Z', 'R', 'A', 'G', 'M')
+                *METRICS, 'oracle_median_scale', 'median_gt_m', 'median_pred_m', *STAT_FIELDS)
+ORDER = ('Z', 'R', 'A', 'G', 'M')      # the original campaign's methods; only used to list legacy absent methods
 LABELS = {'abs_rel': 'AbsRel', 'rmse_mm': 'RMSE (mm)', 'delta_1_1': 'delta<1.1', 'delta_1_25': 'delta<1.25',
           'oracle_median_rmse_mm': 'ORACLE GT-median-scaled RMSE (mm)'}
 ORACLE_NOTE = ('ORACLE DIAGNOSTIC: uses per-frame ground-truth median scaling; not a deployable metric and '
@@ -99,11 +99,11 @@ def _fmt(value, digits):
     return 'n/a' if value is None else f'{value:.{digits}f}'
 
 
-def matched_subset(rows_by_method: dict) -> list:
+def matched_subset(rows_by_method: dict, names=None) -> list:
     """Sequence-macro raw metrics over the rows that are ok for EVERY method (like-for-like rows)."""
     common = set.intersection(*({r['sample_id'] for r in rows if r['status'] == 'ok'} for rows in rows_by_method.values()))
     out = []
-    for name in [m for m in ORDER if m in rows_by_method]:
+    for name in (list(rows_by_method) if names is None else names):
         subset = [r for r in rows_by_method[name] if r['sample_id'] in common]
         aggregate = aggregate_frames(subset) if subset else None
         out.append({'method': name, 'matched_frames': len(subset),
@@ -113,9 +113,10 @@ def matched_subset(rows_by_method: dict) -> list:
 
 
 def comparison(summaries: dict, registered, expected_sequences, rows_by_method) -> dict:
-    """Tables over registered methods; unregistered methods appear as explicit 'not registered' rows."""
-    names = [m for m in ORDER if m in summaries]
-    if set(summaries) != set(registered) or not names:
+    """Tables over the registered methods in registry (spec) order. The legacy Z/R/A/G/M names that a purely legacy
+    campaign did not register are listed as 'not registered'; campaigns with other names list none."""
+    names = list(registered)
+    if set(summaries) != set(names) or len(set(names)) != len(names) or not names:
         raise ValueError('Comparison methods differ from the registry')
     if any(summaries[n]['no_valid_gt_sample_ids'] != summaries[names[0]]['no_valid_gt_sample_ids'] for n in names):
         raise ValueError('no_valid_gt frames differ between methods (must be a label-only property)')
@@ -139,11 +140,21 @@ def comparison(summaries: dict, registered, expected_sequences, rows_by_method) 
             per_sequence.append({'sequence_id': sid, 'method': m, **{k: s[k] for k in (
                 'total_frames', 'ok_frames', 'failed_frames', 'no_valid_gt_frames', 'gt_valid_pixels', 'evaluated_valid_pixels')},
                 **{k: s[k] for k in METRICS}})
-    return {'methods': names, 'not_registered': [m for m in ORDER if m not in summaries],
+    legacy_only = set(names) <= set(ORDER)
+    provenance = []
+    for m in names:
+        meta = summaries[m].get('metadata') or {}
+        trained = meta.get('trainable') is not None
+        provenance.append({'method': m, 'training_seed': meta.get('training_seed'),
+                           'variant': meta.get('trainable') or 'official',
+                           'head': ('last' if meta.get('head_choice') == 'last' else 'best') if trained else 'official',
+                           'selected_step': meta.get('selected_step')})
+    return {'methods': names, 'not_registered': [m for m in ORDER if m not in summaries] if legacy_only else [],
+            'provenance': provenance,
             'headline_sequence_macro_raw': table('sequence_macro', RAW_METRICS),
             'secondary_frame_macro_raw': table('frame_macro', RAW_METRICS),
             'secondary_pixel_global_raw': table('pixel_global', RAW_METRICS),
-            'matched_subset_sequence_macro_raw': matched_subset(rows_by_method),
+            'matched_subset_sequence_macro_raw': matched_subset(rows_by_method, names),
             'oracle_diagnostic_median_scaled': [
                 {'method': r['method'], 'complete': r['complete'], 'frames': r['frames'],
                  'failed_frames': r['failed_frames'], 'no_valid_gt_frames': r['no_valid_gt_frames'],
@@ -159,13 +170,18 @@ def _md_table(headers, rows):
 
 
 def markdown(tables, banner=None, metadata=None) -> str:
-    out = ['# C2 locked evaluation: Z/R/A/G/M comparison', '']
+    out = ['# C2 locked evaluation: method comparison', '']
     if banner:
         out += [f'> **{banner}**', '']
     if metadata:
         out += [f'Registry `{metadata["registry_sha256"]}`; evaluator `{metadata["evaluator_version"]}`; '
                 f'{metadata["frames"]} frames in {metadata["sequences"]} sequences.', '']
     flag = lambda r: '' if r['complete'] else f' INCOMPLETE ({r["failed_frames"]} failed)'
+    out += ['## Method provenance (training seed, model variant, head used)', '']
+    out += _md_table(['Method', 'Seed', 'Variant', 'Head', 'Step'],
+                     [[r['method'], 'n/a' if r['training_seed'] is None else r['training_seed'], r['variant'], r['head'],
+                       'n/a' if r['selected_step'] is None else r['selected_step']] for r in tables.get('provenance', [])])
+    out.append('')
     for key, title, note in (
             ('headline_sequence_macro_raw', 'Headline: raw (unaligned) metric depth, equal weight per sequence', None),
             ('secondary_frame_macro_raw', 'Secondary: raw metric, equal weight per frame', None),
@@ -201,7 +217,8 @@ def write_comparison(directory, tables, banner=None, metadata=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     write_json(directory / 'comparison.json', {'banner': banner, **tables})
-    for key, name in (('headline_sequence_macro_raw', 'comparison_headline'),
+    for key, name in (('provenance', 'comparison_provenance'),
+                      ('headline_sequence_macro_raw', 'comparison_headline'),
                       ('secondary_frame_macro_raw', 'comparison_frame_macro'),
                       ('secondary_pixel_global_raw', 'comparison_pixel_global'),
                       ('matched_subset_sequence_macro_raw', 'comparison_matched_subset'),

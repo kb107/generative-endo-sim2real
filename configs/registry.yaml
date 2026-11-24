@@ -4,6 +4,10 @@
 # Register the FINAL method set before freezing: add G/M run directories below when those runs are
 # finished. A method omitted at freeze time cannot be added later without a new disclosed experiment.
 # All paths are repository-root relative. Z is the official pretrained head and has no run directory.
+# Method names are free (^[A-Za-z][A-Za-z0-9_+.-]{0,39}$) and keep this order in every table. An entry is a run
+# directory (its selected best.pt) or {run_dir: ..., head: best|last} (last = last.pt of a completed run). Optional
+# top-level key code_changes_since_training: [depth/train.py, ...] declares source files that changed after some
+# runs trained (see docs/evaluation.md).
 schema_version: 1
 name: c2_campaign_v1
 output: outputs/c2_campaign/registry.json

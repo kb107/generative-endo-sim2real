@@ -29,13 +29,16 @@ def frame_metrics(prediction, target, valid):
     error = p - g
     ratio = torch.maximum(p / g, g / p)
     # Oracle diagnostic: lower median of double values, as in the reference frame_median mode.
-    scale = g.median() / p.median()
+    median_g, median_p = g.median(), p.median()
+    scale = median_g / median_p
     oracle_squared = ((p * scale - g) ** 2).sum().item()
     stats = {'valid_pixels': p.numel(), 'abs_rel_sum': (error.abs() / g).sum().item(),
              'squared_error_sum_m2': error.square().sum().item(),
              'delta_1_1_count': int((ratio < 1.1).sum()), 'delta_1_25_count': int((ratio < 1.25).sum()),
              'oracle_squared_error_sum_m2': oracle_squared}
-    return {**stats, **metrics_from_stats(stats), 'oracle_median_scale': scale.item()}
+    # Raw metric medians over the valid pixels used for the metrics (diagnostic, not a metric definition).
+    return {**stats, **metrics_from_stats(stats), 'oracle_median_scale': scale.item(),
+            'median_gt_m': median_g.item(), 'median_pred_m': median_p.item()}
 
 
 def metrics_from_stats(stats):
@@ -127,7 +130,7 @@ def main():
     deliberately not reachable from here.
     """
     from ..data.manifests import ManifestDataset
-    from ..depth.checkpoints import read_head
+    from ..depth.checkpoints import apply_checkpoint, read_head
     from ..depth.model import DA3MetricDepth, verify_upstream_checkout
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument('--manifest', default='outputs/manifests/milestone_v1/source_validation.jsonl')
@@ -152,13 +155,16 @@ def main():
     metadata = {'split': 'source_validation', 'native_labels': True, 'smoke_subset_frames': args.frames, 'head': None}
     head_smoke = None
     if args.head:
-        checkpoint = read_head(args.head)
+        checkpoint = read_head(args.head, allow_backbone_lora=True)
         head_smoke = checkpoint['compatibility']['smoke_only']
         require_smoke_for_subset(args.frames, head_smoke, purpose)
-        model.load_head_state_dict(checkpoint['head_state_dict'])
+        apply_checkpoint(model, checkpoint)
         metadata['head'] = {'path': args.head, 'sha256': checkpoint['head_sha256'],
                             'selected_step': checkpoint['selected_step'],
                             'smoke_only': checkpoint['compatibility']['smoke_only']}
+        if 'backbone_lora_state_dict' in checkpoint:
+            metadata['head']['backbone_lora_sha256'] = checkpoint['backbone_lora_sha256']
+            metadata['head']['backbone_lora_config'] = checkpoint['backbone_lora_config']
     rows = evaluate_source(model, dataset, args.device, validation_indices(len(dataset), args.frames))
     summary = write_report(args.output, rows, metadata)
     print(json.dumps({k: summary[k] for k in ('frame_count', 'sequence_count', 'sequence_macro', 'frame_macro', 'pixel_global')}, indent=2))

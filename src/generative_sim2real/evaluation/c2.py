@@ -101,25 +101,40 @@ def _worker_init(worker_id):
 # ---------------------------------------------------------------- heads
 
 def prepare_heads(model, registry, root):
-    """Load and verify every registered head against the registry before any C2 pixel is touched."""
-    from ..depth.checkpoints import head_digest, read_head
+    """Load and verify every registered head (and backbone LoRA) against the registry before any C2 pixel is touched.
+
+    Returns ``{name: checkpoint-like dict}`` accepted by ``depth.checkpoints.apply_checkpoint``.
+    """
+    from ..depth.checkpoints import head_digest, read_final_training, read_head
     digests = official_digests(model)
     base = registry['base']
     if digests != {'official_head_sha256': base['official_head_sha256'], 'backbone_sha256': base['backbone_sha256']}:
         raise RegistryError('Loaded official head/backbone weights differ from the registry digests')
-    states = {'Z': {k: v.detach().cpu().clone() for k, v in model.head_state_dict().items()}}
+    states = {'Z': {'head_state_dict': {k: v.detach().cpu().clone() for k, v in model.head_state_dict().items()}}}
     for record in registry['methods']:
         if record['kind'] != 'trained':
             continue
         path = Path(root) / record['head']['path']
         if sha256_file(path) != record['head']['file_sha256']:
             raise RegistryError(f'{record["name"]}: head file changed')
-        head = read_head(path)
+        last = record.get('head_choice') == 'last'
+        if path.name != ('last.pt' if last else 'best.pt'):
+            raise RegistryError(f'{record["name"]}: registered head file {path.name} does not match its head choice')
+        head = read_final_training(path) if last else read_head(path, allow_backbone_lora=True)
         if head['head_sha256'] != record['head']['head_sha256'] or head['selected_step'] != record['selected_step']:
             raise RegistryError(f'{record["name"]}: head content or selected step differs from the registry')
         if head_digest(head['head_state_dict']) != record['head']['head_sha256']:
             raise RegistryError(f'{record["name"]}: head state digest mismatch')
-        states[record['name']] = head['head_state_dict']
+        recorded_lora = record.get('backbone_lora')
+        if (recorded_lora is None) != ('backbone_lora_state_dict' not in head):
+            raise RegistryError(f'{record["name"]}: backbone-LoRA presence differs from the registry')
+        if recorded_lora is not None:
+            if (head_digest(head['backbone_lora_state_dict']) != recorded_lora['sha256']
+                    or head['backbone_lora_sha256'] != recorded_lora['sha256']
+                    or head['backbone_lora_config'] != recorded_lora['config']):
+                raise RegistryError(f'{record["name"]}: backbone-LoRA content or settings differ from the registry')
+        states[record['name']] = {k: head[k] for k in ('head_state_dict', 'backbone_lora_state_dict', 'backbone_lora_config')
+                                  if k in head}
     return states
 
 
@@ -164,6 +179,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
                  official_digests_fn=None, campaign_dir=None, log=print):
     """``campaign_dir`` is a test hook; the CLI never passes it (ledger/seals/results live in CAMPAIGN_DIR)."""
     from . import registry as reg
+    from ..depth.checkpoints import apply_checkpoint
     root = Path(root)
     campaign = Path(campaign_dir) if campaign_dir else root / CAMPAIGN_DIR
     registry = verify_registry(registry_path, root, code_root=code_root, require_frozen=True,
@@ -222,7 +238,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
         write_json(output / 'registry.json', registry)
         summaries, rows_by_method = {}, {}
         for name in registry['method_names']:
-            model.load_head_state_dict(states[name])
+            apply_checkpoint(model, states[name])
             log(f'Evaluating {name} on {target["count"]} C2 frames')
             started = time.time()
             rows = evaluate_dataset(model, dataset, device, split=TARGET_SPLIT, geometry=TARGET_GEOMETRY,
@@ -231,8 +247,9 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
                 raise RegistryError(f'{name}: evaluated row IDs differ from the registered test rows')
             summary = report.method_summary(rows, target['per_sequence'], {
                 'method': name, 'split': TARGET_SPLIT, 'geometry': TARGET_GEOMETRY, 'registry_sha256': sha,
-                'evaluator_version': registry['evaluator_version'], 'selected_step': next(
-                    r['selected_step'] for r in registry['methods'] if r['name'] == name),
+                'evaluator_version': registry['evaluator_version'],
+                **{k: next(r.get(k) for r in registry['methods'] if r['name'] == name)
+                   for k in ('selected_step', 'training_seed', 'trainable', 'head_choice')},
                 'process_hw': registry['protocol']['model_input']['process_hw'],
                 'seconds': round(time.time() - started, 1), 'device': str(device), 'device_name': _device_name(device)})
             report.write_method_report(output / 'methods' / name, rows, summary)
@@ -271,12 +288,13 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
 
 def source_check(model, dataset, runs, device, output, *, log=print):
     """Evaluate Z and trained heads on native source validation and compare with saved training-time reports."""
-    from ..depth.checkpoints import read_head
-    results, official = {}, {k: v.detach().cpu().clone() for k, v in model.head_state_dict().items()}
-    jobs = [('Z', None, None)] + [(Path(run).name, Path(run), read_head(Path(run) / 'best.pt')) for run in runs]
+    from ..depth.checkpoints import apply_checkpoint, read_head
+    results, official = {}, {'head_state_dict': {k: v.detach().cpu().clone() for k, v in model.head_state_dict().items()}}
+    jobs = [('Z', None, None)] + [(Path(run).name, Path(run), read_head(Path(run) / 'best.pt', allow_backbone_lora=True))
+                                  for run in runs]
     reference_run = Path(runs[0]) if runs else None
     for name, run, head in jobs:
-        model.load_head_state_dict(official if head is None else head['head_state_dict'])
+        apply_checkpoint(model, official if head is None else head)
         rows = evaluate_dataset(model, dataset, device, split='source_validation', geometry='source_native', log=log)
         sequences = {r['sequence_id']: 0 for r in rows}
         for r in rows:
