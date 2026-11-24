@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Source-only DA3 head training for one RGB mode. Refuses to run until the frozen
-# downstream ID list named by CONFIG exists; production launches are gated by the parent.
+# downstream ID list named by CONFIG exists (scripts/prepare_data.sh).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .env
@@ -9,7 +9,7 @@ CONFIG=${CONFIG:-configs/da3.yaml}   # CONFIG=configs/da3_bblora.yaml for the ba
 # every other setting is locked in CONFIG and validated by the trainer.
 MODE=${MODE:-R}   # override per launch: MODE=A bash scripts/train_da3.sh
 GENERATED_MANIFEST=${GENERATED_MANIFEST:-}   # required for MODE=G|M, forbidden for R|A
-SEED=${SEED:-0}   # 0|1|2; seeds 1-2 added 2026-11-21 for variance estimates
+SEED=${SEED:-0}   # training seed (0 is the primary run; 1 and 2 give variance estimates)
 VARIANT=; grep -q 'trainable: head+backbone_lora' "$CONFIG" && VARIANT=_bblora   # run name differs for the bbLoRA config
 RUN_NAME=${RUN_NAME:-da3_${MODE}${VARIANT}_seed${SEED}}
 OUTPUT=outputs/${RUNS_DIR:-runs_c2}/$RUN_NAME

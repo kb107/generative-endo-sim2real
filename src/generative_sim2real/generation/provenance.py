@@ -2,7 +2,7 @@
 produced them, recorded inside render.json / proxy.json / appearance.json / matrix.json.
 
 This records the file versions present when the output was written; it cannot prove which
-version produced an older output (see docs/generator-integration.md for the edit log)."""
+version produced an older output."""
 import argparse
 import datetime
 import hashlib

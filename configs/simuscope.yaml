@@ -1,7 +1,7 @@
 # SimuScope-style baseline: a diffusers re-implementation of the official SimuScope pipeline
 # (Martyniak et al., WACV 2025, arXiv 2412.02332; github SanoScience/SimuScope), NOT the official
 # AUTOMATIC1111 run. Values are the official ones (README training commands, Inference/api_inference.ipynb)
-# unless listed in docs/baseline-simuscope.md under deviations.
+# unless the line says otherwise.
 method: SimuScope-style
 base:
   model_id: stable-diffusion-v1-5/stable-diffusion-v1-5   # official: v1-5-pruned.safetensors (same SD1.5 weights)

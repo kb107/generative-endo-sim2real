@@ -1,0 +1,19 @@
+# C2 campaign #6B registry SPEC (pre-registered 2026-11-23, before the campaign #5 results were read).
+# FDA (Yang & Soatto 2020) classical baseline: low-frequency amplitude of the SAME seeded C1-train reference per ID as T_reinhard,
+# source phase kept; beta 0.01 (canonical) and 0.05. DA3 head-only, MODE=G, seed 0, identical IDs/order/init/3,000 steps as T and G.
+# Built only after both trainings complete; an arm whose run is incomplete at build time is declared absent.
+schema_version: 1
+code_changes_since_training: [depth/checkpoints.py, depth/model.py, depth/train.py, evaluation/c2.py, evaluation/depth.py, evaluation/registry.py, evaluation/report.py]
+name: c2_fda_c6b
+output: outputs/c2_campaign/registry_c6b.json
+methods:
+  Z: null
+  F_fda01: outputs/runs_c2/da3_Ffda01_seed0
+  F_fda05: outputs/runs_c2/da3_Ffda05_seed0
+  F_fda01.last: {run_dir: outputs/runs_c2/da3_Ffda01_seed0, head: last}
+  F_fda05.last: {run_dir: outputs/runs_c2/da3_Ffda05_seed0, head: last}
+data:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  downstream_ids: outputs/manifests/milestone_v1/downstream_ids.json
+  target_test: outputs/manifests/milestone_v1/target_test.jsonl

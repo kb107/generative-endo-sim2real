@@ -1,0 +1,45 @@
+# FINAL C2 campaign #5 registry SPEC (pre-registered 2026-11-23, before the registry was frozen).
+# Primary = best.pt (source-validation selection); secondary = last.pt (final step 3000) of the same completed run.
+# Arms: Z official; R raw SimCol (seeds 0,1); A_mild photometric jitter; A_strong strong jitter (one image per ID);
+# T Reinhard Lab transfer to a random C1-train frame; S same generator with the SOURCE look (source LoRA + Control-LoRA);
+# G Control-LoRA target look (seeds 0,1); Gp G with a new generation seed; M 50/50 raw/G mixture;
+# R_bb / G_bb LoRA on the last 4 DA3 ViT blocks + head. Continuity (best only, reported in campaigns 2-3):
+# G_full / M_full full ControlNet controller, G_simuscope SimuScope-style img2img baseline.
+schema_version: 1
+code_changes_since_training: [depth/checkpoints.py, depth/model.py, depth/train.py, evaluation/c2.py, evaluation/depth.py, evaluation/registry.py, evaluation/report.py]
+name: c2_final_c5
+output: outputs/c2_campaign/registry_c5.json
+methods:
+  Z: null
+  R: outputs/runs_c2/da3_R_seed0
+  R_s1: outputs/runs_c2/da3_R_seed1
+  A_mild: outputs/runs_c2/da3_A_seed0
+  A_strong: outputs/runs_c2/da3_Astrong_seed0
+  T: outputs/runs_c2/da3_T_seed0
+  S: outputs/runs_c2/da3_S_seed0
+  G: outputs/runs_c2_v4/da3_G_seed0
+  G_s1: outputs/runs_c2_v4/da3_G_seed1
+  Gp: outputs/runs_c2_v4/da3_Gb_seed0
+  M: outputs/runs_c2_v4/da3_M_seed0
+  R_bb: outputs/runs_c2/da3_R_bblora_seed0
+  G_bb: outputs/runs_c2_v4/da3_G_bblora_seed0
+  G_full: outputs/runs_c2/da3_G_seed0
+  M_full: outputs/runs_c2/da3_M_seed0
+  G_simuscope: outputs/runs_c2_simuscope/da3_G_seed0
+  R.last: {run_dir: outputs/runs_c2/da3_R_seed0, head: last}
+  R_s1.last: {run_dir: outputs/runs_c2/da3_R_seed1, head: last}
+  A_mild.last: {run_dir: outputs/runs_c2/da3_A_seed0, head: last}
+  A_strong.last: {run_dir: outputs/runs_c2/da3_Astrong_seed0, head: last}
+  T.last: {run_dir: outputs/runs_c2/da3_T_seed0, head: last}
+  S.last: {run_dir: outputs/runs_c2/da3_S_seed0, head: last}
+  G.last: {run_dir: outputs/runs_c2_v4/da3_G_seed0, head: last}
+  G_s1.last: {run_dir: outputs/runs_c2_v4/da3_G_seed1, head: last}
+  Gp.last: {run_dir: outputs/runs_c2_v4/da3_Gb_seed0, head: last}
+  M.last: {run_dir: outputs/runs_c2_v4/da3_M_seed0, head: last}
+  R_bb.last: {run_dir: outputs/runs_c2/da3_R_bblora_seed0, head: last}
+  G_bb.last: {run_dir: outputs/runs_c2_v4/da3_G_bblora_seed0, head: last}
+data:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  downstream_ids: outputs/manifests/milestone_v1/downstream_ids.json
+  target_test: outputs/manifests/milestone_v1/target_test.jsonl

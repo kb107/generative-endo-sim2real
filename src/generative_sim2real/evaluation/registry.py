@@ -24,6 +24,8 @@ EVALUATOR_VERSION = 'c2_locked_eval_v1'
 METHOD_ORDER = ('Z', 'R', 'A', 'G', 'M')          # the original campaign's names (legacy 'declared absent' listing)
 METHOD_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9_+.-]{0,39}$')
 HEAD_CHOICES = ('best', 'last')
+# Optional per-entry inference-time modifiers for DIAGNOSTIC arms of an already-registered head (never for selection).
+MODIFIER_KEYS = ('process_hw', 'output_scale')
 MODES = ('R', 'A', 'G', 'M')
 SELECTION = 'source_validation_sequence_macro_raw_abs_rel'
 FINAL_STEP_SELECTION = 'final_step_of_completed_run (no selection; source-validation AbsRel reported for reference)'
@@ -42,8 +44,27 @@ SPEC_KEYS = {'schema_version', 'name', 'output', 'methods', 'data'}
 SPEC_OPTIONAL_KEYS = {'code_changes_since_training'}
 SPEC_DATA_KEYS = {'source_train', 'source_validation', 'downstream_ids', 'target_test'}
 
-def protocol_section() -> dict:
+def modifier_protocol() -> dict:
+    """Disclosure block that is added to the protocol only when a spec uses diagnostic modifiers."""
+    return {'scope': 'DIAGNOSTIC arms only: per-entry modifiers of an already-registered head; training records, '
+                     'selection and the metric definitions are unchanged',
+            'process_hw': 'the network runs at this size (multiples of 14) instead of the native grid; RGB is resized '
+                          'bicubically by DA3MetricDepth.prepare_inputs, K is scaled per axis (fx*w/native_w, fy*h/native_h, '
+                          'cx, cy consistently), the metric factor uses the scaled mean focal, and the prediction is '
+                          'bilinearly resized (align_corners=False) onto the native GT grid before any metric',
+            'output_scale': 'the metric prediction is multiplied by a fixed positive value (pinned with the sha256 of '
+                            'its source file) before every metric, the oracle median scale and median_pred_m'}
+
+
+def protocol_section(with_modifiers=False) -> dict:
     """Evaluation protocol pinned in the registry (target resolution is read at call time)."""
+    protocol = _protocol_section()
+    if with_modifiers:
+        protocol['diagnostic_modifiers'] = modifier_protocol()
+    return protocol
+
+
+def _protocol_section() -> dict:
     h, w = TARGET_HW
     return {
         'target_geometry': {'transform_id': TARGET_GEOMETRY, 'hw': list(TARGET_HW),
@@ -464,6 +485,24 @@ def audit_run(run_dir, name, root, spec_data, sample_ids, official_head_sha256=N
     return record
 
 
+def _output_scale_source_sha256(name, source, root, key=None, value=None) -> str:
+    """sha256 of the pinned source file; with ``key`` (a '/'-separated path into the source JSON) the spec value must
+    equal the number stored there, so the registered scale is the frozen file's number, not a hand-typed one."""
+    path = Path(root) / source
+    if not path.is_file():
+        raise RegistryError(f'{name}: output_scale source {source} is not a file under the repository root')
+    if key is not None:
+        node = json.loads(path.read_text())
+        try:
+            for part in key.split('/'):
+                node = node[int(part)] if isinstance(node, list) else node[part]
+        except (KeyError, IndexError, ValueError, TypeError):
+            raise RegistryError(f'{name}: output_scale key {key!r} not found in {source}') from None
+        if isinstance(node, bool) or not isinstance(node, (int, float)) or float(node) != float(value):
+            raise RegistryError(f'{name}: output_scale value {value!r} != {node!r} stored at {key!r} in {source}')
+    return sha256_file(path)
+
+
 def _comparable_config(config):
     config = json.loads(json.dumps(config))
     for group, key in VARYING_CONFIG_FIELDS:
@@ -479,6 +518,40 @@ def load_spec(path) -> dict:
     return check_spec(spec)
 
 
+def _process_hw(name, value):
+    if (not isinstance(value, (list, tuple)) or len(value) != 2
+            or any(type(v) is not int or v < 14 or v % 14 for v in value)):
+        raise RegistryError(f'{name}: process_hw must be [h, w], positive integer multiples of 14')
+    return [int(v) for v in value]
+
+
+def _output_scale(name, value):
+    if (not isinstance(value, dict) or set(value) not in ({'value', 'source'}, {'value', 'source', 'key'})
+            or isinstance(value['value'], bool)
+            or not isinstance(value['value'], (int, float)) or not math.isfinite(value['value']) or value['value'] <= 0):
+        raise RegistryError(f'{name}: output_scale must be {{value: <finite float > 0>, source: <repo-relative path>}}')
+    source = value['source']
+    if not isinstance(source, str) or not source or source.startswith('/') or '..' in Path(source).parts:
+        raise RegistryError(f'{name}: output_scale source must be a repo-relative path without ..')
+    if 'key' in value:
+        if not isinstance(value['key'], str) or not value['key']:
+            raise RegistryError(f'{name}: output_scale key must be a non-empty string')
+        return {'value': float(value['value']), 'source': source, 'key': value['key']}
+    return {'value': float(value['value']), 'source': source}
+
+
+def method_modifiers(name, value) -> dict:
+    """Validated diagnostic modifiers of one spec entry: ``{'process_hw': [h, w], 'output_scale': {value, source}}``
+    (only the keys that are present; empty for entries without modifiers)."""
+    out = {}
+    if isinstance(value, dict):
+        if 'process_hw' in value:
+            out['process_hw'] = _process_hw(name, value['process_hw'])
+        if 'output_scale' in value:
+            out['output_scale'] = _output_scale(name, value['output_scale'])
+    return out
+
+
 def parse_method(name, value):
     """(run_dir, head_choice) of one spec method entry; (None, None) for the official pretrained head."""
     if not isinstance(name, str) or not METHOD_NAME.match(name):
@@ -491,11 +564,13 @@ def parse_method(name, value):
         raise RegistryError('Z is reserved for the official pretrained head and must be null')
     if isinstance(value, str) and value:
         return value, 'best'
-    if isinstance(value, dict) and set(value) <= {'run_dir', 'head'} and 'run_dir' in value:
+    if isinstance(value, dict) and set(value) <= {'run_dir', 'head', *MODIFIER_KEYS} and 'run_dir' in value:
         run_dir, head = value['run_dir'], value.get('head', 'best')
         if isinstance(run_dir, str) and run_dir and head in HEAD_CHOICES:
+            method_modifiers(name, value)
             return run_dir, head
-    raise RegistryError(f'{name}: entry must be a run directory string or {{run_dir: ..., head: best|last}}')
+    raise RegistryError(f'{name}: entry must be a run directory string or {{run_dir: ..., head: best|last, '
+                        f'[process_hw: [h, w]], [output_scale: {{value, source}}]}}')
 
 
 def check_spec(spec) -> dict:
@@ -545,6 +620,7 @@ def build_content(spec, root, code_root, digests, method_order=None) -> dict:
         probe['_code_changes_since_training'] = list(spec['code_changes_since_training'])
     ids = read_json(root / spec['data']['downstream_ids'])['sample_ids']
     records, generated, baseline = [], {}, None
+    with_modifiers = False
     for name in methods:
         if name == 'Z':
             records.append({'name': 'Z', 'kind': 'official', 'run_dir': None, 'head': None, 'selected_step': None,
@@ -556,6 +632,15 @@ def build_content(spec, root, code_root, digests, method_order=None) -> dict:
         baseline = baseline or comparable
         if comparable != baseline:
             raise RegistryError(f'{name}: training configuration differs from the other methods beyond mode/generated manifest/seed/model variant')
+        modifiers = method_modifiers(name, spec['methods'][name])
+        if 'process_hw' in modifiers:
+            record['inference_process_hw'] = modifiers['process_hw']
+        if 'output_scale' in modifiers:
+            record['output_scale'] = {**modifiers['output_scale'],
+                                      'sha256': _output_scale_source_sha256(
+                                          name, modifiers['output_scale']['source'], root,
+                                          modifiers['output_scale'].get('key'), modifiers['output_scale']['value'])}
+        with_modifiers = with_modifiers or bool(modifiers)
         if (record['mode'] in ('G', 'M')) != (record['generated_manifest'] is not None):
             raise RegistryError(f'{name}: generated manifest is required for G/M only')
         if record['generated_manifest']:
@@ -571,7 +656,7 @@ def build_content(spec, root, code_root, digests, method_order=None) -> dict:
             'evaluator_version': EVALUATOR_VERSION, 'spec': spec,
             'method_names': methods, 'declared_absent_methods': [m for m in METHOD_ORDER if m not in methods] if legacy else [],
             'methods': records, 'base': base_section(digests), 'data': describe_data(spec, root, generated),
-            'code': code_manifest(code_root), 'protocol': protocol_section(), 'disclosures': list(DISCLOSURES)}
+            'code': code_manifest(code_root), 'protocol': protocol_section(with_modifiers), 'disclosures': list(DISCLOSURES)}
 
 
 def build_registry(spec, root, output, *, digests, code_root=None) -> dict:

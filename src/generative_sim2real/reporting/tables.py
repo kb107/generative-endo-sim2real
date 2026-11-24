@@ -52,7 +52,7 @@ def gate_rows(gate_root, blind):
 
 GATE_HEADER = ['Gate run', 'Images', 'R0 audit (real RGB)', 'R1 correct < off', 'R2 correct < wrong',
                'R3 wrong follows supplied', 'Proxy verdict (AbsRel)', 'Proxy verdict (Spearman, secondary)',
-               'Implementer self-rating (NOT blind)', 'Independent blind rating, seed 0 grid',
+               'Self-rating (NOT blind)', 'Independent blind rating, seed 0 grid',
                'Independent blind rating, seed 1 grid', 'Declared gate verdict']
 
 
@@ -63,7 +63,7 @@ def gate_table(gate_root, blind_path, out_stem):
         'Source-controller gate (P4), single seed pilot, SOURCE validation only; 8 conditions x 2 paired noise seeds, '
         'frozen DA3Metric proxy, median-scaled AbsRel. Cells are conditions in the expected direction / 8 (mean gain). '
         'Each check needs >= 7/8 and a positive mean gain. R3 is exactly at the threshold in the passing pilot steps.',
-        '**Rating provenance.** "Implementer self-rating" was written by the implementing agent after seeing the proxy '
+        '**Rating provenance.** "Self-rating" was written by the person running the gate after seeing the proxy '
         'results for that gate (not blind); the declared verdict combines the proxy rules with this rating. "Independent blind rating" '
         f'is by {(blind or {}).get("rater", "an independent rater")}; it did not see the proxy results and covers the grids '
         'listed. At pilot step 1500 the two ratings disagree (self-rating FAIL, blind 24/24 yes on both seeds); both are shown.']

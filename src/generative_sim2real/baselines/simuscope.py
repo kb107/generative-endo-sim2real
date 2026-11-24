@@ -1,8 +1,8 @@
 """SimuScope-style baseline: SD1.5 img2img of SimCol RGB with a C1 style LoRA and SoftEdge+Depth ControlNets.
 
 A diffusers re-implementation of the pipeline of Martyniak et al., WACV 2025 (arXiv 2412.02332,
-github SanoScience/SimuScope). It is NOT the official AUTOMATIC1111 run; deviations are listed in
-docs/baseline-simuscope.md. The output is one 512x512 image per frozen downstream ID, paired with the
+github SanoScience/SimuScope). It is NOT the official AUTOMATIC1111 run; settings that differ from
+the official ones are noted in configs/simuscope.yaml. The output is one 512x512 image per frozen downstream ID, paired with the
 unchanged SimCol depth, using the bulk-generation bookkeeping (shards, atomic writes, manifest) and the
 rgb_modes G/M validation unchanged.
 
@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -91,7 +90,7 @@ def write_selection(config, root='.'):
 
 # ------------------------------------------------------------ LoRA training ----
 
-KOHYA_FLAGS = [   # the official README command for CholectG45/CholectL45, flag for flag (see deviations in the doc)
+KOHYA_FLAGS = [   # the official README command for CholectG45/CholectL45, flag for flag
     '--network_train_unet_only', '--bucket_no_upscale', '--bucket_reso_steps=64', '--cache_latents',
     '--cache_latents_to_disk', '--enable_bucket', '--min_bucket_reso=256', '--max_bucket_reso=2048',
     '--learning_rate=0.0012', '--lr_scheduler=constant_with_warmup',

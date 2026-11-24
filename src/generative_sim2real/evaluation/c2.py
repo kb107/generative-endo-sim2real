@@ -11,6 +11,7 @@ the evaluator with saved training-time reports; it never touches C2.
 from __future__ import annotations
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -46,12 +47,16 @@ def set_processing(model, hw):
 
 @torch.no_grad()
 def evaluate_dataset(model, dataset, device='cpu', *, split, geometry, hw=None, indices=None, num_workers=0, log=None,
-                     exact_grid=False):
+                     exact_grid=False, output_scale=None):
     """One code path for C2 and the source-validation cross-check: raw metric depth against the GT grid.
 
     ``exact_grid`` (C2): the network output must already lie on the GT grid; any mismatch aborts, so no
     anisotropic resize can occur. Otherwise (source validation) the prediction is bilinearly resized to the GT grid.
+    ``output_scale`` (diagnostic arms only; ``None`` = unchanged) multiplies the metric prediction before the failure
+    check and every metric.
     """
+    if output_scale is not None and not (math.isfinite(output_scale) and output_scale > 0):
+        raise ValueError(f'output_scale must be finite and > 0, got {output_scale!r}')
     if dataset.split != split or dataset.geometry != geometry:
         raise ValueError(f'Expected {split}/{geometry}, got {dataset.split}/{dataset.geometry}')
     indices = list(range(len(dataset))) if indices is None else list(indices)
@@ -81,6 +86,8 @@ def evaluate_dataset(model, dataset, device='cpu', *, split, geometry, hw=None, 
             else:
                 prediction = F.interpolate(prediction, size=target.shape[-2:], mode='bilinear',
                                            align_corners=False)[0].cpu()
+            if output_scale is not None:
+                prediction = prediction * float(output_scale)
             failure = prediction_failure(prediction, valid)
             if failure:
                 rows.append(report.failed_row(sid, seq, failure[0], int(valid.sum()), failure[1]))
@@ -138,6 +145,29 @@ def prepare_heads(model, registry, root):
     return states
 
 
+# ---------------------------------------------------------------- diagnostic modifiers
+
+def method_inference(record, native_hw):
+    """(process_hw, exact_grid, output_scale) for one registered method; plain records give (native, True, None)."""
+    hw = record.get('inference_process_hw')
+    scale = record.get('output_scale')
+    if hw is not None and (len(hw) != 2 or any(type(v) is not int or v < 14 or v % 14 for v in hw)):
+        raise RegistryError(f'{record["name"]}: registered inference_process_hw {hw!r} is not a pair of multiples of 14')
+    if scale is not None:
+        value = scale.get('value')
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
+                or not scale.get('sha256')):
+            raise RegistryError(f'{record["name"]}: registered output_scale is not a pinned finite value > 0')
+        scale = float(value)
+    hw = tuple(native_hw) if hw is None else tuple(hw)
+    return hw, hw == tuple(native_hw), scale
+
+
+def method_modifier_metadata(record):
+    """Modifier fields of a registry record (empty for plain entries), as shown in summaries and campaign.json."""
+    return {k: record[k] for k in ('inference_process_hw', 'output_scale') if k in record}
+
+
 # ---------------------------------------------------------------- campaign
 
 def dataset_matches(dataset, target):
@@ -185,6 +215,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
     registry = verify_registry(registry_path, root, code_root=code_root, require_frozen=True,
                                expected_sha256=expected_sha256, official_digests_fn=official_digests_fn)
     sha = registry_hash(registry)
+    modified = {r['name']: method_modifier_metadata(r) for r in registry['methods'] if method_modifier_metadata(r)}
     target = registry['data']['target_test']
     runtime = reg.check_runtime(registry)
     dataset = dataset_factory(registry, root)           # builds the adapter and validates manifests; decodes no frame
@@ -201,6 +232,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
                 'declared_absent': registry['declared_absent_methods'], 'frames': target['count'],
                 'sequences': target['sequence_count'], 'per_sequence': target['per_sequence'],
                 'process_hw': registry['protocol']['model_input']['process_hw'],
+                **({'method_modifiers': modified} if modified else {}),
                 'official_digests_recomputed_from_weights_file': True,
                 'governing_files_rehashed_on_disk': target['governing_files_rehashed_on_disk'],
                 'ledger': plan, 'would_refuse': would_refuse, 'output_dir': str(output), 'model_loaded': False,
@@ -209,7 +241,10 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
         raise RegistryError('Runtime differs from the registry: ' + '; '.join(runtime))
     torch.use_deterministic_algorithms(True, warn_only=True)
     model = model_factory()
-    set_processing(model, registry['protocol']['model_input']['process_hw'])
+    native_hw = registry['protocol']['model_input']['process_hw']
+    set_processing(model, native_hw)
+    for record in registry['methods']:
+        method_inference(record, native_hw)             # malformed registered modifiers are refused before the ledger start
     states = prepare_heads(model, registry, root)       # fully verified before the ledger records a start
     model.to(device)
     with ledger.locked(campaign):                        # audit + plan + start are one critical section
@@ -238,11 +273,16 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
         write_json(output / 'registry.json', registry)
         summaries, rows_by_method = {}, {}
         for name in registry['method_names']:
+            record = next(r for r in registry['methods'] if r['name'] == name)
+            process_hw, exact, scale = method_inference(record, native_hw)
+            set_processing(model, process_hw)
             apply_checkpoint(model, states[name])
-            log(f'Evaluating {name} on {target["count"]} C2 frames')
+            modifiers = method_modifier_metadata(record)
+            log(f'Evaluating {name} on {target["count"]} C2 frames' + (f' (DIAGNOSTIC modifiers: {modifiers})' if modifiers else ''))
             started = time.time()
             rows = evaluate_dataset(model, dataset, device, split=TARGET_SPLIT, geometry=TARGET_GEOMETRY,
-                                    hw=tuple(target['hw']), num_workers=num_workers, log=log, exact_grid=True)
+                                    hw=tuple(target['hw']), num_workers=num_workers, log=log, exact_grid=exact,
+                                    output_scale=scale)
             if [r['sample_id'] for r in rows] != [r['sample_id'] for r in dataset.rows]:
                 raise RegistryError(f'{name}: evaluated row IDs differ from the registered test rows')
             summary = report.method_summary(rows, target['per_sequence'], {
@@ -250,7 +290,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
                 'evaluator_version': registry['evaluator_version'],
                 **{k: next(r.get(k) for r in registry['methods'] if r['name'] == name)
                    for k in ('selected_step', 'training_seed', 'trainable', 'head_choice')},
-                'process_hw': registry['protocol']['model_input']['process_hw'],
+                'process_hw': list(process_hw), **modifiers,
                 'seconds': round(time.time() - started, 1), 'device': str(device), 'device_name': _device_name(device)})
             report.write_method_report(output / 'methods' / name, rows, summary)
             summaries[name], rows_by_method[name] = summary, rows
@@ -270,6 +310,7 @@ def run_campaign(registry_path, *, root, device='cpu', dry_run=False, disclosure
         digest_files = {str(p.relative_to(output)): sha256_file(p) for p in sorted(output.rglob('*')) if p.is_file()}
         write_json(output / 'campaign.json', {
             'registry_sha256': sha, 'ledger_start': start, 'banner': banner, 'methods': registry['method_names'],
+            **({'method_modifiers': modified} if modified else {}),
             'complete': all(s['complete'] for s in summaries.values()), 'output_files_sha256': digest_files,
             'runtime': reg.runtime_requirements(), 'device': str(device), 'device_name': _device_name(device)})
         (output / 'COMPLETE').write_text(sha + '\n')

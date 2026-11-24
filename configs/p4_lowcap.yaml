@@ -1,7 +1,7 @@
-# CAMPAIGN-2 LOW-CAPACITY CONTROLLER CONFIG (docs/lowrank-controller.md): copy of the p4_sweep.yaml pattern with a
-# `controller:` block (kind lowrank) and short probe runs; non-deterministic attention (lower memory, faster; exact
-# resume not needed for probes). The four base runs below are unchanged copies (source_lora is the source LoRA the
-# low-rank controllers train under; reuse its existing outputs/p4-appearance/runs/source_lora run, do not retrain).
+# Low-capacity ("Control-LoRA") controller config: the p4.yaml pattern with a `controller:` block (kind lowrank) and
+# short probe runs; non-deterministic attention (lower memory, faster; exact resume not needed for probes). The four
+# base runs below are unchanged copies (source_lora is the source LoRA the low-rank controllers train under; reuse its
+# existing outputs/p4-appearance/runs/source_lora run, do not retrain).
 # P4 appearance-LoRA and source-controller training stage.
 # The training runs, the gate rubric and every pass rule below are declared BEFORE any P4 job
 # runs (this file's first run is the smoke on GPU 2, 2026-10-19). Do not edit a rule after seeing
@@ -85,7 +85,7 @@ runs:
     time_cap_hours: 4
     seeds: {loader: 303, noise: 1303}
 
-  target_lora_v2:                # v2 retrain, declared in configs/p5_sweep.yaml `step_B_retrain` before the sweep ran
+  target_lora_v2:                # v2 retrain, declared before the scale/guidance sweep ran
     stage: lora
     adapter: target
     role: target_lora
@@ -186,8 +186,7 @@ runs:
     time_cap_hours: 2
     seeds: {loader: 403, noise: 1403}
 
-  # PLACEHOLDER long run: the parent fills lr and the ranks from the 600-step probes (the values below are the
-  # first probe's, not a selection). 8000 steps like controller_long_lr1e-4.
+  # Control-LoRA controller used for the reported generated pairs: ranks from the best 600-step probe.
   controller_lowrank_long:
     stage: controller
     adapter: source
@@ -197,7 +196,7 @@ runs:
     source_lora_run: source_lora
     lr_from: controller_lr
     lr: 0.0003
-    controller: {block_rank: 16, after_rank: 16}   # parent fill (2026-10-21): best 600-step probe by held-out gap (tie with full controller at 600 steps)
+    controller: {block_rank: 16, after_rank: 16}   # best 600-step probe by held-out gap (tie with full controller at 600 steps)
     steps: 3000   # reduced from 8000 for time; the full-controller comparison point is its own step-3000 checkpoint
     checkpoint_every: 500
     warmup: 0
@@ -255,7 +254,7 @@ gate:
       (not evidence that transfer fails). If they fail with a flat or falling R1 gain: NOT FOLLOWING
       DEPTH AT THIS BUDGET. Reported as measured; undertraining is not proof that transfer fails.
   visual_rubric:
-    scale: yes | partly | no, rated by the reviewing agent on the saved grid, per condition
+    scale: yes | partly | no, rated by the reviewer on the saved grid, per condition
     questions:
       layout_follows_control: >
         The lumen/fold/wall layout of the correct-depth image matches the control image (near

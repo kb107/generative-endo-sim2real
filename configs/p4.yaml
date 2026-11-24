@@ -76,7 +76,7 @@ runs:
     time_cap_hours: 4
     seeds: {loader: 303, noise: 1303}
 
-  target_lora_v2:                # v2 retrain, declared in configs/p5_sweep.yaml `step_B_retrain` before the sweep ran
+  target_lora_v2:                # v2 retrain, declared before the scale/guidance sweep ran
     stage: lora
     adapter: target
     role: target_lora
@@ -141,7 +141,7 @@ gate:
       (not evidence that transfer fails). If they fail with a flat or falling R1 gain: NOT FOLLOWING
       DEPTH AT THIS BUDGET. Reported as measured; undertraining is not proof that transfer fails.
   visual_rubric:
-    scale: yes | partly | no, rated by the reviewing agent on the saved grid, per condition
+    scale: yes | partly | no, rated by the reviewer on the saved grid, per condition
     questions:
       layout_follows_control: >
         The lumen/fold/wall layout of the correct-depth image matches the control image (near

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SimuScope-style baseline (diffusers re-implementation; see docs/baseline-simuscope.md).
+# SimuScope-style baseline (diffusers re-implementation; see configs/simuscope.yaml).
 # Stages: select (C1 frame choice) | lora (kohya style LoRA, GPU) | smoke (16 images, GPU) |
 #         generate (all frozen downstream IDs, GPU) | manifest | verify | score (generation metrics)
 #   GPU=2 bash scripts/simuscope.sh                       # everything

@@ -1,0 +1,34 @@
+# C2 campaign #6A registry SPEC (pre-registered 2026-11-23, before the campaign #5 results were read). Disclosed DIAGNOSTIC arms (scale anatomy); native unaligned results of campaign #5 stay primary.
+# .406 = network processes 406x504 (f ~ 240.8 px ~ the 241.5 px training focal) and the prediction is bilinearly resized to the
+# 504x630 GT grid; .cG = prediction multiplied by exp(-c_G(h)), c_G(h) = label-free bias of head h on the 2,000 Control-LoRA
+# generated pairs (source labels only; outputs/analysis/scale_anatomy/output_scales.json, derived from predictions.json).
+# R and G native are anchors: they must reproduce campaign #5 (same heads, same rows, merged evaluator at defaults).
+schema_version: 1
+code_changes_since_training: [depth/checkpoints.py, depth/model.py, depth/train.py, evaluation/c2.py, evaluation/depth.py, evaluation/registry.py, evaluation/report.py]
+name: c2_diag_c6a
+output: outputs/c2_campaign/registry_c6a.json
+methods:
+  Z: null
+  R: outputs/runs_c2/da3_R_seed0
+  G: outputs/runs_c2_v4/da3_G_seed0
+  R.406: {run_dir: outputs/runs_c2/da3_R_seed0, head: best, process_hw: [406, 504]}
+  R_s1.406: {run_dir: outputs/runs_c2/da3_R_seed1, head: best, process_hw: [406, 504]}
+  G.406: {run_dir: outputs/runs_c2_v4/da3_G_seed0, head: best, process_hw: [406, 504]}
+  G_s1.406: {run_dir: outputs/runs_c2_v4/da3_G_seed1, head: best, process_hw: [406, 504]}
+  R.cG: {run_dir: outputs/runs_c2/da3_R_seed0, head: best, output_scale: {value: 0.7625602577059069, source: outputs/analysis/scale_anatomy/output_scales.json, key: R/scale}}
+  R_s1.cG: {run_dir: outputs/runs_c2/da3_R_seed1, head: best, output_scale: {value: 0.7609686802262907, source: outputs/analysis/scale_anatomy/output_scales.json, key: R_s1/scale}}
+  R.cG.406: {run_dir: outputs/runs_c2/da3_R_seed0, head: best, process_hw: [406, 504], output_scale: {value: 0.7625602577059069, source: outputs/analysis/scale_anatomy/output_scales.json, key: R/scale}}
+  R_s1.cG.406: {run_dir: outputs/runs_c2/da3_R_seed1, head: best, process_hw: [406, 504], output_scale: {value: 0.7609686802262907, source: outputs/analysis/scale_anatomy/output_scales.json, key: R_s1/scale}}
+  A_mild.406: {run_dir: outputs/runs_c2/da3_A_seed0, head: best, process_hw: [406, 504]}
+  A_strong.406: {run_dir: outputs/runs_c2/da3_Astrong_seed0, head: best, process_hw: [406, 504]}
+  T.406: {run_dir: outputs/runs_c2/da3_T_seed0, head: best, process_hw: [406, 504]}
+  S.406: {run_dir: outputs/runs_c2/da3_S_seed0, head: best, process_hw: [406, 504]}
+  Gp.406: {run_dir: outputs/runs_c2_v4/da3_Gb_seed0, head: best, process_hw: [406, 504]}
+  M.406: {run_dir: outputs/runs_c2_v4/da3_M_seed0, head: best, process_hw: [406, 504]}
+  R_bb.406: {run_dir: outputs/runs_c2/da3_R_bblora_seed0, head: best, process_hw: [406, 504]}
+  G_bb.406: {run_dir: outputs/runs_c2_v4/da3_G_bblora_seed0, head: best, process_hw: [406, 504]}
+data:
+  source_train: outputs/manifests/milestone_v1/source_train.jsonl
+  source_validation: outputs/manifests/milestone_v1/source_validation.jsonl
+  downstream_ids: outputs/manifests/milestone_v1/downstream_ids.json
+  target_test: outputs/manifests/milestone_v1/target_test.jsonl

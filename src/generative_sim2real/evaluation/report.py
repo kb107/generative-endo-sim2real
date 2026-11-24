@@ -149,6 +149,16 @@ def comparison(summaries: dict, registered, expected_sequences, rows_by_method) 
                            'variant': meta.get('trainable') or 'official',
                            'head': ('last' if meta.get('head_choice') == 'last' else 'best') if trained else 'official',
                            'selected_step': meta.get('selected_step')})
+    if any('inference_process_hw' in (summaries[m].get('metadata') or {}) or 'output_scale' in (summaries[m].get('metadata') or {})
+           for m in names):
+        # Diagnostic modifiers (explicit columns only when some arm uses them, so plain campaigns keep their shape).
+        for row in provenance:
+            meta = summaries[row['method']].get('metadata') or {}
+            hw, scale = meta.get('inference_process_hw'), meta.get('output_scale')
+            row.update({'inference_process_hw': 'native' if hw is None else f'{hw[0]}x{hw[1]}',
+                        'output_scale': '' if scale is None else scale['value'],
+                        'output_scale_source': '' if scale is None else scale['source'],
+                        'output_scale_sha256': '' if scale is None else scale['sha256']})
     return {'methods': names, 'not_registered': [m for m in ORDER if m not in summaries] if legacy_only else [],
             'provenance': provenance,
             'headline_sequence_macro_raw': table('sequence_macro', RAW_METRICS),
@@ -178,10 +188,21 @@ def markdown(tables, banner=None, metadata=None) -> str:
                 f'{metadata["frames"]} frames in {metadata["sequences"]} sequences.', '']
     flag = lambda r: '' if r['complete'] else f' INCOMPLETE ({r["failed_frames"]} failed)'
     out += ['## Method provenance (training seed, model variant, head used)', '']
-    out += _md_table(['Method', 'Seed', 'Variant', 'Head', 'Step'],
+    provenance = tables.get('provenance', [])
+    modified = bool(provenance) and 'inference_process_hw' in provenance[0]
+    out += _md_table(['Method', 'Seed', 'Variant', 'Head', 'Step'] + (['Process HW', 'Output scale (source, sha256)'] if modified else []),
                      [[r['method'], 'n/a' if r['training_seed'] is None else r['training_seed'], r['variant'], r['head'],
-                       'n/a' if r['selected_step'] is None else r['selected_step']] for r in tables.get('provenance', [])])
+                       'n/a' if r['selected_step'] is None else r['selected_step']]
+                      + ([r['inference_process_hw'], 'none' if r['output_scale'] == '' else
+                          f'{r["output_scale"]} ({r["output_scale_source"]}, {r["output_scale_sha256"][:12]})'] if modified else [])
+                      for r in provenance])
     out.append('')
+    if modified:
+        out += ['_DIAGNOSTIC arms: entries with a non-native Process HW and/or an output scale apply an inference-time '
+                'modifier to an already-registered head (training and selection unchanged). Process HW: the frame is '
+                'resized bicubically to it, K is scaled per axis, and the prediction is bilinearly resized back to the '
+                'native GT grid; output scale: the metric prediction is multiplied by the pinned value before every metric '
+                'incl. the oracle diagnostic._', '']
     for key, title, note in (
             ('headline_sequence_macro_raw', 'Headline: raw (unaligned) metric depth, equal weight per sequence', None),
             ('secondary_frame_macro_raw', 'Secondary: raw metric, equal weight per frame', None),

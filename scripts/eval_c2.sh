@@ -4,17 +4,18 @@
 # it builds the real adapter (parses pose files, lists files) but loads no model and decodes no C2 pixel.
 # Ledger, seals and results live in the fixed directory outputs/c2_campaign (not configurable).
 # A second campaign under a different registry is a new disclosed experiment and needs
-# DISCLOSE_NEW_EXPERIMENT (see docs/evaluation.md).
+# DISCLOSE_NEW_EXPERIMENT=<reason>. Typical use (campaign 5, then the 6A and 6B diagnostics):
+#   REGISTRY=outputs/c2_campaign/registry_c5.json DRY_RUN=0 bash scripts/eval_c2.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .env
 REGISTRY=${REGISTRY:-outputs/c2_campaign/registry.json}
-EXPECTED_REGISTRY_SHA256=${EXPECTED_REGISTRY_SHA256-1ceaa08c5bd314c118a93c3e542dd3d9d1bb6d00811a01807bffdf7ff6b81ccc}   # campaign 1, frozen 2026-10-19T21:47:55Z
+EXPECTED_REGISTRY_SHA256=${EXPECTED_REGISTRY_SHA256:-}      # hash printed when the registry was frozen; checked when set
 DISCLOSE_NEW_EXPERIMENT=${DISCLOSE_NEW_EXPERIMENT:-}             # non-empty reason only when the ledger shows another registry
 DRY_RUN=${DRY_RUN:-1}                # DRY_RUN=0 bash scripts/eval_c2.sh runs the campaign
 GPU=${GPU:-1}                        # physical GPU index; check nvidia-smi first
 DEVICE=cuda:0
-NUM_WORKERS=0
+NUM_WORKERS=${NUM_WORKERS:-0}   # DataLoader decode workers; does not change results
 PYTHON=external/da3-venv/bin/python
 export CUDA_VISIBLE_DEVICES=$GPU
 export PYTHONPATH=src

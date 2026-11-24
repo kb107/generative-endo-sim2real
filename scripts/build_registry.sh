@@ -9,7 +9,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .env
 SPEC=${SPEC:-configs/registry.yaml}
 ACTION=${ACTION:-build}          # override per launch: ACTION=freeze bash scripts/build_registry.sh
-EXPECTED_REGISTRY_SHA256=        # optional: hash recorded in docs/plan; checked by ACTION=verify
+EXPECTED_REGISTRY_SHA256=        # optional: hash printed by ACTION=freeze; checked by ACTION=verify
 PYTHON=external/da3-venv/bin/python
 export CUDA_VISIBLE_DEVICES=     # CPU only
 export PYTHONPATH=src

@@ -1,14 +1,13 @@
 # V2 of the reduced P5 matrix (v1 = configs/p5.yaml, kept unchanged). A copy of v1 with ONLY the target adapter,
-# LoRA scale and guidance changed, as chosen by the declared RGB-appearance review (configs/p5_sweep.yaml,
-# configs/p5_review_v2.yaml; decision in outputs/p5-diagnostics/review_v2/decision.json): the retrained target
+# LoRA scale and guidance changed, as chosen by the declared RGB-appearance review of the target-LoRA scale/guidance sweep: the retrained target
 # LoRA (run target_lora_v2, step 2000), LoRA scale 1.0, guidance 4.5. The same scale and guidance apply to the
 # source arm (and the guidance to the none arm). Conditions, derangement, seed, controller, rules and
 # thresholds are untouched. v2 is a post-hoc recipe revision driven by RGB-appearance metrics, NOT by the
 # P5 geometry score. Below, the lines that differ from v1 are marked `# v2`.
-# P5 reduced swap-diagnostic matrix (docs/implementation-plan.md P5, reduced 8-condition / 1-seed version).
+# P5 reduced swap-diagnostic matrix (P5, reduced 8-condition / 1-seed version).
 # EVERY rule below was written before the matrix was rendered. Do not edit a rule after seeing a result;
 # a change after results are seen is a new, disclosed analysis. Single seed, 8 conditions, one proxy model:
-# this is a reduced diagnostic matrix, not the 32-condition x 2-seed expansion (waits for a parent decision).
+# this is a reduced diagnostic matrix, not the 32-condition x 2-seed expansion.
 schema_version: 1
 generator_config: configs/generator.yaml
 p4_config: configs/p4.yaml                    # conditions, partner pairing and paths of the P4 gate are reused
@@ -82,5 +81,5 @@ analysis:
     8-row panels, one row per condition in the fixed order, 256-px square tiles, same display geometry
     (no crop, same resize) for real RGB, control images and generations (source geometry is square 512).
   visual_judgement: >
-    No visual verdict is issued by the implementer. The panels are saved for blind rating by the coordinator.
+    No visual verdict is issued automatically. The panels are saved for blind rating by a human reviewer.
 scope_boundary: no bulk generation of the downstream images, no 32 x 2 expansion, no DA3 G/M training
